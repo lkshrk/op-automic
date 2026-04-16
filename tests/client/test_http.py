@@ -44,6 +44,52 @@ def test_auth_path_constant_is_authenticate() -> None:
     assert _AUTH_PATH == "/authenticate"
 
 
+def test_request_logging_emits_structured_event(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Configure JSON logging so we can parse exactly one event off stderr.
+    import json
+
+    import structlog
+
+    from op_aromic.observability.logging import configure_logging
+
+    monkeypatch.delenv("CI", raising=False)
+    structlog.reset_defaults()
+    configure_logging(level="info", format="json")
+
+    settings = _make_settings()
+    base = f"{settings.url}/{settings.client_id}"
+    with respx.mock(assert_all_called=False) as mock:
+        _mock_auth(mock, settings)
+        mock.get(f"{base}/objects/FOO").mock(
+            return_value=httpx.Response(200, json={"Name": "FOO"}),
+        )
+        with AutomicClient(settings) as client:
+            client.get_object("FOO")
+
+    err_lines = [
+        line for line in capsys.readouterr().err.splitlines() if line.strip()
+    ]
+    request_events = [
+        json.loads(line)
+        for line in err_lines
+        if '"event": "http.request"' in line
+    ]
+    assert request_events, "expected at least one http.request event"
+    # The actual GET to /objects/FOO must have been logged with its path
+    # and numeric status; crucially no Authorization header leaks.
+    for ev in request_events:
+        assert "Authorization" not in json.dumps(ev)
+        assert "Bearer" not in json.dumps(ev)
+    got = next(ev for ev in request_events if ev["method"] == "GET")
+    assert got["path"] == f"/ae/api/v1/{settings.client_id}/objects/FOO"
+    assert got["status"] == 200
+    assert isinstance(got["duration_ms"], (int, float))
+
+    structlog.reset_defaults()
+
+
 def test_update_method_is_put() -> None:
     # Default assumption per docs/ISSUES.md: Automic requires full-body PUT.
     assert _UPDATE_METHOD == "PUT"

@@ -12,10 +12,10 @@ or malformed. Non-429 errors (including 4xx like 409) are not retried.
 from __future__ import annotations
 
 import email.utils as _email_utils
-import logging
 import time
 from collections.abc import Iterator
 from typing import Any, cast
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -27,6 +27,7 @@ from op_aromic.client.errors import (
     RateLimitError,
 )
 from op_aromic.config.settings import AutomicSettings
+from op_aromic.observability.logging import get_logger
 
 # Path segment appended to the configured base URL (which already contains
 # ``/ae/api/v1``) to obtain the bearer token. The live AWA REST shape is not
@@ -52,7 +53,13 @@ _STATUS_MAP: dict[int, type[AutomicError]] = {
     429: RateLimitError,
 }
 
-_logger = logging.getLogger(__name__)
+_logger = get_logger("op_aromic.client.http")
+
+
+def _url_path_only(url: str) -> str:
+    """Strip scheme/host/query — we log path only to avoid leaking query secrets."""
+    split = urlsplit(url)
+    return split.path or "/"
 
 
 def _parse_retry_after(header_value: str | None, attempt: int) -> float:
@@ -133,10 +140,23 @@ class AutomicClient:
 
         Non-429 responses are returned unchanged for the caller's
         ``_raise_for_status`` mapping to handle. Only 429 triggers the
-        retry loop.
+        retry loop. Emits ``event="http.request"`` on every completed
+        attempt — headers are never logged; redaction is handled at the
+        processor level.
         """
+        path = _url_path_only(url)
         for attempt in range(_MAX_429_ATTEMPTS):
+            started = time.monotonic()
             response = self._http.request(method, url, **kwargs)
+            elapsed_ms = (time.monotonic() - started) * 1000.0
+            _logger.info(
+                "http.request",
+                method=method,
+                path=path,
+                status=response.status_code,
+                duration_ms=round(elapsed_ms, 2),
+                attempt=attempt + 1,
+            )
             if response.status_code != 429:
                 return response
             if attempt == _MAX_429_ATTEMPTS - 1:
@@ -145,8 +165,12 @@ class AutomicClient:
                 response.headers.get("Retry-After"), attempt,
             )
             _logger.warning(
-                "429 from %s %s; sleeping %.2fs before retry %d/%d",
-                method, url, sleep_for, attempt + 1, _MAX_429_ATTEMPTS - 1,
+                "http.rate_limited",
+                method=method,
+                path=path,
+                sleep_seconds=sleep_for,
+                attempt=attempt + 1,
+                max_attempts=_MAX_429_ATTEMPTS,
             )
             time.sleep(sleep_for)
         # Unreachable: the loop always returns on the last attempt.
