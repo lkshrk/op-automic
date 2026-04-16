@@ -439,6 +439,196 @@ def test_apply_delete_calls_delete_endpoint() -> None:
     assert result.successes[0].action == "delete"
 
 
+def test_apply_pass2_failure_marks_remaining_pass2_as_skipped() -> None:
+    # Two workflows triggering pass 2; first pass-2 PUT fails → second skipped.
+    settings = _settings()
+    base = f"{settings.url}/{settings.client_id}"
+    loaded = [
+        _loaded_job("J1"),
+        _loaded_workflow("WF1", ["J1"]),
+        _loaded_workflow("WF2", ["J1"]),
+    ]
+    with respx.mock(assert_all_called=False) as mock:
+        _mock_auth(mock, settings)
+        mock.get(f"{base}/objects/J1").mock(return_value=httpx.Response(404))
+        mock.get(f"{base}/objects/WF1").mock(return_value=httpx.Response(404))
+        mock.get(f"{base}/objects/WF2").mock(return_value=httpx.Response(404))
+        mock.post(f"{base}/objects").mock(
+            return_value=httpx.Response(201, json={}),
+        )
+        # First PUT (on WF1 or WF2 — depends on order) returns 500, second
+        # would succeed but should be skipped.
+        calls = {"n": 0}
+
+        def put_responder(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return httpx.Response(500, text="boom")
+            return httpx.Response(200, json={})
+
+        mock.put(f"{base}/objects/WF1").mock(side_effect=put_responder)
+        mock.put(f"{base}/objects/WF2").mock(side_effect=put_responder)
+        with AutomicClient(settings) as client:
+            api = AutomicAPI(client)
+            plan = build_plan(loaded, api)
+            graph = build_graph(loaded)
+            result = apply(plan, client, graph)
+    assert result.status == "partial"
+    assert len(result.failures) == 1
+    assert len(result.skipped) == 1
+    assert result.skipped[0].kind == "Workflow"
+
+
+@pytest.mark.parametrize(
+    "kind,spec",
+    [
+        (
+            "Schedule",
+            {
+                "entries": [
+                    {
+                        "task": {"kind": "Job", "name": "J1"},
+                        "start_time": "02:30",
+                        "calendar_keyword": "WEEKDAYS",
+                    },
+                ],
+            },
+        ),
+        ("Calendar", {"keywords": [{"name": "WEEKDAYS", "type": "STATIC", "values": ["MO"]}]}),
+        (
+            "Variable",
+            {"var_type": "STATIC", "entries": [{"key": "K", "value": "v"}]},
+        ),
+    ],
+)
+def test_apply_covers_all_canonical_to_spec_branches(
+    kind: str, spec: dict[str, Any],
+) -> None:
+    # Dry-run every kind so _canonical_to_spec exercises its full switch.
+    settings = _settings()
+    base = f"{settings.url}/{settings.client_id}"
+    manifest = Manifest.model_validate(
+        {
+            "apiVersion": "aromic.io/v1",
+            "kind": kind,
+            "metadata": {"name": "OBJ", "folder": "/T"},
+            "spec": spec,
+        },
+    )
+    loaded = [LoadedManifest(source_path=Path("x.yaml"), doc_index=0, manifest=manifest)]
+
+    with respx.mock(assert_all_called=False) as mock:
+        _mock_auth(mock, settings)
+        mock.get(f"{base}/objects/OBJ").mock(return_value=httpx.Response(404))
+        mock.post(f"{base}/objects").mock(
+            return_value=httpx.Response(500, text="should not be called in dry-run"),
+        )
+        with AutomicClient(settings) as client:
+            api = AutomicAPI(client)
+            plan = build_plan(loaded, api)
+            graph = build_graph(loaded)
+            result = apply(plan, client, graph, dry_run=True)
+    assert result.status == "success"
+    assert len(result.successes) == 1
+
+
+def test_apply_delete_dry_run_logs_success_without_calling() -> None:
+    from op_aromic.engine.differ import ObjectDiff
+    from op_aromic.engine.planner import Plan
+
+    settings = _settings()
+    base = f"{settings.url}/{settings.client_id}"
+    delete_diff = ObjectDiff(
+        action="delete",
+        kind="Job",
+        name="ZAP",
+        folder="/PROD",
+        desired=None,
+        actual={"kind": "Job", "name": "ZAP", "folder": "/PROD"},
+    )
+    plan = Plan(deletes=[delete_diff])
+    with respx.mock(assert_all_called=False) as mock:
+        _mock_auth(mock, settings)
+        delete_route = mock.delete(f"{base}/objects/ZAP").mock(
+            return_value=httpx.Response(500),
+        )
+        with AutomicClient(settings) as client:
+            graph = build_graph([])
+            result = apply(plan, client, graph, dry_run=True)
+    assert not delete_route.called
+    assert result.status == "success"
+    assert len(result.successes) == 1
+
+
+def test_apply_delete_failure_reports_as_failure() -> None:
+    from op_aromic.engine.differ import ObjectDiff
+    from op_aromic.engine.planner import Plan
+
+    settings = _settings()
+    base = f"{settings.url}/{settings.client_id}"
+    delete_diff = ObjectDiff(
+        action="delete",
+        kind="Job",
+        name="ZAP",
+        folder="/PROD",
+        desired=None,
+        actual={"kind": "Job", "name": "ZAP", "folder": "/PROD"},
+    )
+    plan = Plan(deletes=[delete_diff])
+    with respx.mock(assert_all_called=False) as mock:
+        _mock_auth(mock, settings)
+        mock.get(f"{base}/objects/ZAP").mock(
+            return_value=httpx.Response(200, json={"Name": "ZAP"}),
+        )
+        mock.delete(f"{base}/objects/ZAP").mock(
+            return_value=httpx.Response(500, text="nope"),
+        )
+        with AutomicClient(settings) as client:
+            graph = build_graph([])
+            result = apply(plan, client, graph)
+    assert result.status == "partial"
+    assert len(result.failures) == 1
+
+
+def test_capture_plan_markers_snapshots_updates_and_deletes() -> None:
+    from op_aromic.engine.applier import capture_plan_markers
+    from op_aromic.engine.differ import ObjectDiff
+    from op_aromic.engine.planner import Plan
+
+    settings = _settings()
+    base = f"{settings.url}/{settings.client_id}"
+    update_diff = ObjectDiff(
+        action="update",
+        kind="Job",
+        name="U",
+        folder="/PROD",
+        desired={"name": "U", "folder": "/PROD", "kind": "Job"},
+        actual={"name": "U", "folder": "/PROD", "kind": "Job"},
+    )
+    delete_diff = ObjectDiff(
+        action="delete",
+        kind="Job",
+        name="D",
+        folder="/PROD",
+        desired=None,
+        actual={"name": "D", "folder": "/PROD", "kind": "Job"},
+    )
+    plan = Plan(updates=[update_diff], deletes=[delete_diff])
+
+    with respx.mock(assert_all_called=False) as mock:
+        _mock_auth(mock, settings)
+        mock.get(f"{base}/objects/U").mock(
+            return_value=httpx.Response(200, json={"Name": "U", "LastModified": "TU"}),
+        )
+        mock.get(f"{base}/objects/D").mock(
+            return_value=httpx.Response(200, json={"Name": "D", "LastModified": "TD"}),
+        )
+        with AutomicClient(settings) as client:
+            markers = capture_plan_markers(plan, client)
+    assert markers[("Job", "U")] == "TU"
+    assert markers[("Job", "D")] == "TD"
+
+
 def test_successful_apply_is_frozen() -> None:
     # SuccessfulApply must be a frozen dataclass per the project style.
     import dataclasses

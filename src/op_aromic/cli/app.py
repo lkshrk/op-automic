@@ -10,13 +10,24 @@ from rich.console import Console
 
 from op_aromic import __version__
 from op_aromic.cli.output import plan_to_json_dict, render_plan
+from op_aromic.cli.prompts import confirm_apply, confirm_destroy, summarise_destroy
 from op_aromic.client.api import AutomicAPI
 from op_aromic.client.errors import AutomicError
 from op_aromic.client.http import AutomicClient
 from op_aromic.config.settings import AutomicSettings
+from op_aromic.engine.applier import (
+    ApplyResult,
+    capture_plan_markers,
+)
+from op_aromic.engine.applier import (
+    apply as apply_plan,
+)
+from op_aromic.engine.dependency import CyclicDependencyError, build_graph
+from op_aromic.engine.destroyer import destroy as destroy_objects
+from op_aromic.engine.differ import FieldChange, ObjectDiff
 from op_aromic.engine.errors import EngineError
 from op_aromic.engine.loader import load_manifests
-from op_aromic.engine.planner import build_plan
+from op_aromic.engine.planner import Plan, build_plan
 from op_aromic.engine.validator import Issue, Severity, validate_manifests
 
 app = typer.Typer(
@@ -125,6 +136,29 @@ def _build_api_client(settings: AutomicSettings) -> AutomicClient:
     return AutomicClient(settings)
 
 
+def _load_and_validate(target_path: Path) -> list:  # type: ignore[type-arg]
+    """Shared loader path for plan/apply/destroy.
+
+    Raises typer.Exit(1) on malformed manifests. We delegate to validator
+    so cross-doc rules catch typos before any network round-trip.
+    """
+    try:
+        loaded = load_manifests(target_path)
+    except EngineError as exc:
+        _error_console.print(f"[bold red]ERROR[/] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    report = validate_manifests(loaded)
+    if report.errors:
+        _print_issues(report.errors, Severity.ERROR)
+        _error_console.print(
+            f"[bold red]validation failed:[/] {len(report.errors)} error(s); "
+            "fix manifests before continuing.",
+        )
+        raise typer.Exit(code=1)
+    return loaded
+
+
 @app.command()
 def plan(
     path: str = typer.Argument(".", help="Path to YAML manifests."),
@@ -148,22 +182,8 @@ def plan(
       1 — error (bad manifests, auth failure, transport failure)
       2 — one or more changes pending
     """
-    # Fail fast on invalid manifests — same pipeline as `validate`.
     target_path = Path(path)
-    try:
-        loaded = load_manifests(target_path)
-    except EngineError as exc:
-        _error_console.print(f"[bold red]ERROR[/] {exc}")
-        raise typer.Exit(code=1) from exc
-
-    report = validate_manifests(loaded)
-    if report.errors:
-        _print_issues(report.errors, Severity.ERROR)
-        _error_console.print(
-            f"[bold red]validation failed:[/] {len(report.errors)} error(s); "
-            "fix manifests before planning.",
-        )
-        raise typer.Exit(code=1)
+    loaded = _load_and_validate(target_path)
 
     settings = AutomicSettings()
     render_console = Console(no_color=no_color, force_terminal=not no_color)
@@ -185,13 +205,132 @@ def plan(
         raise typer.Exit(code=2)
 
 
+def _plan_from_file(path: Path) -> Plan:
+    """Reconstruct a Plan from --plan-file JSON (produced by `plan --out`)."""
+    data = json.loads(path.read_text())
+
+    def _diff(d: dict) -> ObjectDiff:  # type: ignore[type-arg]
+        return ObjectDiff(
+            action=d["action"],
+            kind=d["kind"],
+            name=d["name"],
+            folder=d["folder"],
+            desired=d.get("desired"),
+            actual=d.get("actual"),
+            changes=[
+                FieldChange(
+                    path=c["path"],
+                    before=c.get("before"),
+                    after=c.get("after"),
+                    kind=c["kind"],
+                )
+                for c in d.get("changes", [])
+            ],
+        )
+
+    return Plan(
+        creates=[_diff(d) for d in data.get("creates", [])],
+        updates=[_diff(d) for d in data.get("updates", [])],
+        deletes=[_diff(d) for d in data.get("deletes", [])],
+        noops=[_diff(d) for d in data.get("noops", [])],
+    )
+
+
+def _exit_code_for_apply(result: ApplyResult) -> int:
+    if result.status == "success":
+        return 0
+    return 2
+
+
 @app.command()
 def apply(
     path: str = typer.Argument(".", help="Path to YAML manifests."),
-    auto_approve: bool = typer.Option(False, "--auto-approve", help="Skip confirmation prompt."),
+    auto_approve: bool = typer.Option(
+        False, "--auto-approve", help="Skip the yes/no confirmation prompt.",
+    ),
+    plan_file: str | None = typer.Option(
+        None,
+        "--plan-file",
+        help="Trust a plan.json produced by `aromic plan --out`; skip re-plan.",
+    ),
+    force: bool = typer.Option(
+        False, "--force", help="Skip concurrent-edit detection.",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Walk the plan without writing; zero API mutations.",
+    ),
+    target: str | None = typer.Option(
+        None, "--target", "-t", help="Limit plan to a single metadata.name.",
+    ),
+    prune: bool = typer.Option(
+        False, "--prune", help="Include managed-orphan deletes in the plan.",
+    ),
 ) -> None:
-    """Apply changes to Automic. Prompts for confirmation."""
-    typer.echo(f"Applying changes from {path}...")
+    """Apply pending changes to Automic.
+
+    Exit codes:
+      0 — success (everything applied or nothing to do)
+      1 — fatal error (bad manifests, auth, etc.)
+      2 — partial success (some items failed or were skipped)
+    """
+    target_path = Path(path)
+    loaded = _load_and_validate(target_path)
+
+    try:
+        graph = build_graph(loaded)
+    except CyclicDependencyError as exc:
+        _error_console.print(f"[bold red]cycle:[/] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    settings = AutomicSettings()
+    try:
+        with _build_api_client(settings) as client:
+            api = AutomicAPI(client)
+
+            if plan_file is not None:
+                the_plan = _plan_from_file(Path(plan_file))
+            else:
+                the_plan = build_plan(loaded, api, prune=prune, target=target)
+
+            if not auto_approve:
+                # Prompt before any writes. `input()` raises EOFError if
+                # stdin is empty (e.g. Typer CliRunner with no input) —
+                # treat that as a "no".
+                try:
+                    approved = confirm_apply(the_plan, console=_console)
+                except EOFError:
+                    approved = False
+                if not approved:
+                    _console.print("[yellow]aborted[/]: apply cancelled by user.")
+                    raise typer.Exit(code=1)
+
+            markers = (
+                {}
+                if dry_run or plan_file is not None
+                else capture_plan_markers(the_plan, client)
+            )
+            result = apply_plan(
+                the_plan,
+                client,
+                graph,
+                dry_run=dry_run,
+                force=force,
+                plan_markers=markers,
+            )
+    except AutomicError as exc:
+        _error_console.print(f"[bold red]API error:[/] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    _console.print(
+        f"[bold]Applied:[/] {len(result.successes)} ok, "
+        f"{len(result.failures)} failed, "
+        f"{len(result.skipped)} skipped",
+    )
+    for failure in result.failures:
+        _error_console.print(
+            f"[red]FAIL[/] {failure.kind}/{failure.name}: {failure.reason}",
+        )
+    raise typer.Exit(code=_exit_code_for_apply(result))
 
 
 @app.command(name="export")
@@ -206,13 +345,74 @@ def export_cmd(
 @app.command()
 def destroy(
     path: str = typer.Argument(".", help="Path to YAML manifests."),
-    confirm: bool = typer.Option(False, "--confirm", help="Required to actually destroy."),
+    confirm: bool = typer.Option(
+        False, "--confirm", help="Required to actually destroy.",
+    ),
+    auto_approve: bool = typer.Option(
+        False, "--auto-approve", help="Skip the yes/no confirmation prompt.",
+    ),
+    only_managed: bool = typer.Option(
+        True,
+        "--only-managed/--no-only-managed",
+        help="Refuse objects that don't carry the managed-by marker.",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Walk the plan without deleting; zero API calls.",
+    ),
 ) -> None:
-    """Remove managed objects from Automic. Requires --confirm."""
+    """Delete managed objects from Automic in reverse-dependency order.
+
+    Requires --confirm. Exit codes:
+      0 — success
+      1 — fatal error or prompt aborted
+      2 — partial (some failures or refused objects)
+    """
     if not confirm:
         typer.echo("Error: --confirm flag is required for destroy.", err=True)
         raise typer.Exit(code=1)
-    typer.echo(f"Destroying objects from {path}...")
+
+    target_path = Path(path)
+    loaded = _load_and_validate(target_path)
+
+    try:
+        graph = build_graph(loaded)
+    except CyclicDependencyError as exc:
+        _error_console.print(f"[bold red]cycle:[/] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    if not auto_approve:
+        try:
+            approved = confirm_destroy(loaded, console=_console)
+        except EOFError:
+            approved = False
+        if not approved:
+            _console.print("[yellow]aborted[/]: destroy cancelled by user.")
+            raise typer.Exit(code=1)
+
+    settings = AutomicSettings()
+    try:
+        with _build_api_client(settings) as client:
+            result = destroy_objects(
+                loaded,
+                client,
+                graph,
+                only_managed=only_managed,
+                dry_run=dry_run,
+            )
+    except AutomicError as exc:
+        _error_console.print(f"[bold red]API error:[/] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    summarise_destroy(result, console=_console)
+    for failure in result.failures:
+        _error_console.print(
+            f"[red]FAIL[/] {failure.kind}/{failure.name}: {failure.reason}",
+        )
+    for refusal in result.refused:
+        _error_console.print(
+            f"[yellow]REFUSED[/] {refusal.kind}/{refusal.name}: {refusal.reason}",
+        )
+    raise typer.Exit(code=0 if result.status == "success" else 2)
 
 
 def main() -> None:
