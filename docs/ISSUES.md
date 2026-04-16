@@ -87,6 +87,42 @@ Scratchpad populated during autonomous implementation. Each entry:
 - **Resolution needed**: once the real Automic marker field is confirmed,
   consider folding it into the planner's diff so the two-step call collapses.
 
+### 429 retry window (3 total attempts, exponential fallback)
+- **Phase**: 3
+- **Severity**: low
+- **Context**: `client/http._send_with_retry` honours `Retry-After` up to
+  three total attempts before raising `RateLimitError`. Malformed headers
+  fall back to `(0.5s, 1.0s)` exponential backoff. Constants at module
+  scope so ops can retune without touching call sites.
+- **Default chosen**: 3 attempts; no circuit breaker; per-request (not
+  global) budget.
+- **Resolution needed**: once a live Automic surfaces actual rate limits
+  we may want a global budget so ten concurrent items do not each retry
+  three times.
+
+### Apply halts pass on first failure, does not roll back
+- **Phase**: 3
+- **Severity**: medium
+- **Context**: `engine/applier.apply` stops the current pass on any
+  write failure, marks the rest of the pass as `Skipped`, and returns
+  `ApplyResult.status == "partial"`. Automic has no cross-object
+  transactions, so rollback would require custom compensating writes;
+  instead we rely on idempotent re-run.
+- **Default chosen**: no rollback; re-run converges remainder.
+- **Resolution needed**: consider a `--rollback-on-error` flag in Phase 5
+  if customers report half-applied manifests.
+
+### Apply-driven deletes vs destroyer
+- **Phase**: 3
+- **Severity**: low
+- **Context**: `apply` still processes `plan.deletes` when the plan was
+  built with `--prune`. This overlaps with `destroy`. The two paths are
+  intentionally different: `apply --prune` removes orphans inline
+  alongside other changes; `destroy` is an explicit reverse-order sweep
+  of every declared manifest.
+- **Default chosen**: keep both; document the distinction.
+- **Resolution needed**: none (by design).
+
 ### Managed-object prune detection heuristic
 - **Phase**: 2
 - **Severity**: medium
