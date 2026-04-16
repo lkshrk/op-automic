@@ -72,6 +72,21 @@ Scratchpad populated during autonomous implementation. Each entry:
 - **Default chosen**: keep the map centralised in `client/api.py::_KIND_TO_AUTOMIC_TYPE`; the duplicate in serializer intentionally stays so serializer never imports client.
 - **Resolution needed**: confirm against `/ae/api/v1/{client}/objects?type=...` on a live instance.
 
+### Concurrency marker capture lives outside ObjectDiff
+- **Phase**: 3
+- **Severity**: medium
+- **Context**: `engine/normalizer.py::_COMMON_IGNORED` strips `LastModified` as
+  a volatile field, so `ObjectDiff.actual` has no optimistic-concurrency
+  marker baked in. Phase 2 is frozen so the planner cannot attach one to the
+  diff directly.
+- **Default chosen**: `engine/applier.capture_plan_markers(plan, client)`
+  snapshots a marker for every update/delete immediately after plan time. The
+  CLI calls it between `build_plan` and `apply`, then passes the dict via
+  `apply(..., plan_markers=...)`. The applier itself does one extra GET per
+  write to detect drift against that dict.
+- **Resolution needed**: once the real Automic marker field is confirmed,
+  consider folding it into the planner's diff so the two-step call collapses.
+
 ### Managed-object prune detection heuristic
 - **Phase**: 2
 - **Severity**: medium
