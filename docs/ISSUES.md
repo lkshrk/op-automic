@@ -123,6 +123,34 @@ Scratchpad populated during autonomous implementation. Each entry:
 - **Default chosen**: keep both; document the distinction.
 - **Resolution needed**: none (by design).
 
+### Round-trip shape: per-kind vs full-set
+- **Phase**: 4
+- **Severity**: low
+- **Context**: The validator's reference-resolution rule requires every
+  `ObjectRef` in a manifest set to resolve to another manifest in the same
+  set. For non-leaf kinds (Workflow → Jobs, Schedule → Workflow) a
+  naive single-kind export therefore fails `validate` not because the
+  exporter is wrong but because the validator (correctly) sees dangling
+  refs. The round-trip property test splits into two shapes: leaf kinds
+  (Calendar, Variable, Job) round-trip per-kind; the flagship full-set
+  test exports everything together so refs resolve.
+- **Default chosen**: document the split in `tests/engine/test_round_trip.py`
+  and keep the flagship full-set test as the Phase 4 quality bar.
+- **Resolution needed**: none (design decision; matches real usage where
+  `aromic export` pulls the whole adoption corpus at once).
+
+### Layout "by-folder" leaf-directory convention
+- **Phase**: 4
+- **Severity**: low
+- **Context**: `by-folder` layout mirrors Automic's folder tree onto the
+  filesystem, writing one file per folder. The convention chosen is
+  `<root>/<parent>/<leaf>/<leaf>.yaml` so each folder carries a file named
+  after itself — predictable, and opens a place for a future
+  `<leaf>/README.md` or per-folder index without collisions.
+- **Default chosen**: put the file inside its leaf directory; tests assert
+  this exact path.
+- **Resolution needed**: none; can be revisited if operators push back.
+
 ### Managed-object prune detection heuristic
 - **Phase**: 2
 - **Severity**: medium
