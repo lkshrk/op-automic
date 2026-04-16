@@ -1,0 +1,11 @@
+{
+  "Name": "ETL.CONFIG",
+  "Type": "VARA",
+  "Folder": "/PROD/ETL",
+  "VarType": "STATIC",
+  "ACLHash": "deadbeefcafebabe",
+  "Entries": [
+    { "Key": "TARGET_ENV", "Value": "PROD" },
+    { "Key": "RETRIES", "Value": "3" }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "Name": "ETL.NIGHTLY",
+  "Type": "JSCH",
+  "Folder": "/PROD/ETL",
+  "OH_LASTMODIFIED": "2025-01-03",
+  "Entries": [
+    {
+      "Task": { "Kind": "Workflow", "Name": "ETL.DAILY" },
+      "StartTime": "02:00",
+      "CalendarKeyword": "WEEKDAY"
+    }
+  ]
+}

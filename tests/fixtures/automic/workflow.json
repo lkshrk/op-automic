@@ -1,0 +1,22 @@
+{
+  "Name": "ETL.DAILY",
+  "Type": "JOBP",
+  "Folder": "/PROD/ETL",
+  "Title": "Daily ETL",
+  "LastModified": "2025-01-01T00:00:00Z",
+  "LastModifiedBy": "ADMIN",
+  "OH_IDNR": 1000,
+  "Version": 7,
+  "Tasks": [
+    {
+      "Name": "STEP.EXTRACT",
+      "Ref": { "Kind": "Job", "Name": "ETL.EXTRACT" },
+      "After": []
+    },
+    {
+      "Name": "STEP.LOAD",
+      "Ref": { "Kind": "Job", "Name": "ETL.LOAD" },
+      "After": ["STEP.EXTRACT"]
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "Name": "ETL.EXTRACT",
+  "Type": "JOBS",
+  "Folder": "/PROD/ETL",
+  "Title": "Extract source data",
+  "Host": "HOST.ETL.01",
+  "Login": "LOGIN.ETL.SVC",
+  "Script": "/opt/etl/extract.sh",
+  "ScriptType": "OS",
+  "LastModified": "2025-01-02T00:00:00Z",
+  "InternalId": 42
+}

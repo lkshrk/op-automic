@@ -29,11 +29,10 @@ def test_destroy_requires_confirm() -> None:
     assert "--confirm" in result.output
 
 
-def test_plan_stub() -> None:
-    # Phase-2 stub; just verify it runs and echoes its placeholder.
-    result = runner.invoke(app, ["plan", "./manifests"])
-    assert result.exit_code == 0
-    assert "Planning" in result.output
+def test_plan_missing_path_exits_one() -> None:
+    # Phase 2: plan is wired. A nonexistent path fails at the loader stage.
+    result = runner.invoke(app, ["plan", "/nonexistent/manifests"])
+    assert result.exit_code == 1
 
 
 def test_apply_stub() -> None:

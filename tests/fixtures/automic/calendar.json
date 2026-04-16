@@ -1,0 +1,14 @@
+{
+  "Name": "WORK.DAYS",
+  "Type": "CALE",
+  "Folder": "/PROD/CAL",
+  "Title": "Workday calendar",
+  "Version": 3,
+  "Keywords": [
+    {
+      "Name": "WEEKDAY",
+      "Type": "WEEKDAY",
+      "Values": ["MON", "TUE", "WED", "THU", "FRI"]
+    }
+  ]
+}
