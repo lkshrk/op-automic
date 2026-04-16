@@ -24,7 +24,7 @@ Scratchpad populated during autonomous implementation. Each entry:
 - **Context**: `update_object` uses PATCH. Automic typically requires full-body PUT.
 - **Default chosen**: assume PUT with full merged payload; switch in Phase 3 applier.
 - **Resolution needed**: live verification.
-- **2026-04-17 (Phase 2)**: Flipped `update_object` to use `_UPDATE_METHOD = "PUT"` in `src/op_aromic/client/http.py`. Constant is module-level so a future flip back to PATCH is a one-liner. (commit hash recorded when committing this group.)
+- **2026-04-17 (Phase 2, commit 996349e)**: Flipped `update_object` to use `_UPDATE_METHOD = "PUT"` in `src/op_aromic/client/http.py`. Constant is module-level so a future flip back to PATCH is a one-liner.
 
 ### Automic JSON field shape
 - **Phase**: 2
@@ -64,4 +64,18 @@ Scratchpad populated during autonomous implementation. Each entry:
 - **Context**: The plan calls for name rules (200 char max, `^[A-Z0-9._#$@]+$`) in the validator. Pydantic `Metadata` previously enforced `max_length=200`, which short-circuited the validator for over-length names. Moved the length cap out of the envelope so the validator is the single source of truth and can report *all* offenders with file:line context.
 - **Default chosen**: envelope only enforces non-empty; engine/validator.py owns Automic-specific rules.
 - **Resolution needed**: none (design decision).
+
+### Kind to Automic type mapping in client/api.py
+- **Phase**: 2
+- **Severity**: medium
+- **Context**: `list_objects_typed` needs an Automic type string for the `type` query parameter. Mapping `{Workflow→JOBP, Job→JOBS, Schedule→JSCH, Calendar→CALE, Variable→VARA}` is taken from Broadcom AE REST docs and is duplicated in `engine/serializer.py::_KIND_TO_TYPE`. Not verified against a live list endpoint.
+- **Default chosen**: keep the map centralised in `client/api.py::_KIND_TO_AUTOMIC_TYPE`; the duplicate in serializer intentionally stays so serializer never imports client.
+- **Resolution needed**: confirm against `/ae/api/v1/{client}/objects?type=...` on a live instance.
+
+### Managed-object prune detection heuristic
+- **Phase**: 2
+- **Severity**: medium
+- **Context**: `_is_managed` checks `payload["Annotations"]["aromic.io/managed-by"] == "op-aromic"` OR the string `aromic.io/managed-by=op-aromic` in `payload["Documentation"]`. Automic has no native annotations; the real wire field is unknown.
+- **Default chosen**: accept either shape; exporter / applier will write into `Documentation` so plan can detect managed orphans on `--prune`.
+- **Resolution needed**: pick one canonical location once a live instance shows which fields survive round-tripping.
 
