@@ -12,7 +12,7 @@ from op_aromic.client.api import AutomicAPI
 from op_aromic.client.http import _AUTH_PATH, AutomicClient
 from op_aromic.config.settings import AutomicSettings
 from op_aromic.engine.loader import LoadedManifest
-from op_aromic.engine.planner import build_plan
+from op_aromic.engine.planner import build_plan, build_plan_parallel
 from op_aromic.models.base import Manifest
 
 
@@ -171,3 +171,72 @@ def test_build_plan_prune_skips_unmanaged_orphan() -> None:
             plan = build_plan([_loaded_job("X", "h")], api, prune=True)
 
     assert plan.deletes == []
+
+
+def test_build_plan_parallel_matches_sequential_output() -> None:
+    # With the same mock, sequential and parallel planners must produce
+    # equivalent Plans. Parallelism is a runtime optimisation — never a
+    # behavioural change.
+    settings = _settings()
+    base = f"{settings.url}/{settings.client_id}"
+    manifests = [_loaded_job(f"J{i}", "h") for i in range(5)]
+    with respx.mock(assert_all_called=False) as mock:
+        _mock_auth(mock, settings)
+        for lm in manifests:
+            name = lm.manifest.metadata.name
+            mock.get(f"{base}/objects/{name}").mock(
+                return_value=httpx.Response(200, json=_automic_job(name, "h")),
+            )
+        with AutomicClient(settings) as client:
+            api = AutomicAPI(client)
+            serial = build_plan(manifests, api)
+        with AutomicClient(settings) as client:
+            api = AutomicAPI(client)
+            parallel = build_plan_parallel(manifests, api, max_workers=4)
+
+    assert [d.name for d in serial.noops] == [d.name for d in parallel.noops]
+    assert serial.total_changes == parallel.total_changes
+
+
+def test_build_plan_parallel_sequential_fallback() -> None:
+    settings = _settings()
+    base = f"{settings.url}/{settings.client_id}"
+    with respx.mock(assert_all_called=False) as mock:
+        _mock_auth(mock, settings)
+        mock.get(f"{base}/objects/X").mock(
+            return_value=httpx.Response(200, json=_automic_job("X", "h")),
+        )
+        with AutomicClient(settings) as client:
+            api = AutomicAPI(client)
+            # max_workers=1 must delegate to build_plan; output shape identical.
+            plan = build_plan_parallel([_loaded_job("X", "h")], api, max_workers=1)
+
+    assert plan.noops
+    assert not plan.has_changes
+
+
+def test_build_plan_parallel_prune_detects_orphan() -> None:
+    settings = _settings()
+    base = f"{settings.url}/{settings.client_id}"
+    managed_orphan = _automic_job("ORPHAN", "h", managed=True)
+    with respx.mock(assert_all_called=False) as mock:
+        _mock_auth(mock, settings)
+        mock.get(f"{base}/objects/X").mock(
+            return_value=httpx.Response(200, json=_automic_job("X", "h")),
+        )
+
+        def list_responder(request: httpx.Request) -> httpx.Response:
+            if "type=JOBS" in str(request.url):
+                return httpx.Response(200, json={"data": [managed_orphan]})
+            return httpx.Response(200, json={"data": []})
+
+        mock.get(f"{base}/objects").mock(side_effect=list_responder)
+
+        with AutomicClient(settings) as client:
+            api = AutomicAPI(client)
+            plan = build_plan_parallel(
+                [_loaded_job("X", "h")], api, max_workers=4, prune=True,
+            )
+
+    assert len(plan.deletes) == 1
+    assert plan.deletes[0].name == "ORPHAN"

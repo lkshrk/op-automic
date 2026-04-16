@@ -18,6 +18,7 @@ from op_aromic.engine.normalizer import (
     to_canonical_from_automic,
     to_canonical_from_manifest,
 )
+from op_aromic.engine.parallel import ParallelExecutionError, parallel_map
 
 _MANAGED_BY_ANNOTATION = "aromic.io/managed-by"
 _MANAGED_BY_VALUE = "op-aromic"
@@ -144,4 +145,101 @@ def build_plan(
     return Plan(creates=creates, updates=updates, deletes=deletes, noops=noops)
 
 
-__all__ = ["Plan", "build_plan"]
+def build_plan_parallel(
+    loaded: list[LoadedManifest],
+    api: AutomicAPI,
+    *,
+    max_workers: int = 8,
+    prune: bool = False,
+    target: str | None = None,
+) -> Plan:
+    """Parallelised variant of :func:`build_plan`.
+
+    Fetches ``get_object_typed`` for every desired manifest concurrently
+    through ``parallel_map`` so large manifest sets do not pay one
+    round-trip of latency per object. Output order (``creates`` /
+    ``updates`` / ``noops``) mirrors input order — the actual HTTP calls
+    overlap but the resulting Plan is deterministic for stable snapshots.
+
+    Delegates to :func:`build_plan` when ``max_workers <= 1`` so there is
+    one canonical sequential path for tests that assert call order.
+    """
+    if max_workers <= 1:
+        return build_plan(loaded, api, prune=prune, target=target)
+
+    manifests = _filter_target(loaded, target)
+
+    def _fetch(lm: LoadedManifest) -> dict[str, Any] | None:
+        return api.get_object_typed(lm.manifest.kind, lm.manifest.metadata.name)
+
+    try:
+        actual_raws = parallel_map(_fetch, manifests, max_workers=max_workers)
+    except ParallelExecutionError as exc:
+        # Unwrap so the CLI's ``except AutomicError`` boundary still catches
+        # transport / auth failures. If multiple items failed we surface the
+        # first — the parallel error still carries all of them for callers
+        # that want richer reporting.
+        if exc.failures:
+            raise exc.failures[0][1] from exc
+        raise
+
+    creates: list[ObjectDiff] = []
+    updates: list[ObjectDiff] = []
+    noops: list[ObjectDiff] = []
+    declared_names: set[tuple[str, str]] = set()
+
+    for lm, actual_raw in zip(manifests, actual_raws, strict=True):
+        kind = lm.manifest.kind
+        name = lm.manifest.metadata.name
+        folder = lm.manifest.metadata.folder
+        declared_names.add((kind, name))
+
+        desired_canonical = to_canonical_from_manifest(lm.manifest)
+        actual_canonical = (
+            to_canonical_from_automic(kind, actual_raw)
+            if actual_raw is not None
+            else None
+        )
+        diff = compute_diff(
+            kind=kind,
+            name=name,
+            folder=folder,
+            desired=desired_canonical,
+            actual=actual_canonical,
+        )
+        if diff.action == "create":
+            creates.append(diff)
+        elif diff.action == "update":
+            updates.append(diff)
+        else:
+            noops.append(diff)
+
+    deletes: list[ObjectDiff] = []
+    if prune:
+        # Prune pass still iterates sequentially — list_objects already
+        # paginates internally, and the parallel win is tiny relative to
+        # the risk of N simultaneous full listings.
+        for kind in ("Workflow", "Job", "Schedule", "Calendar", "Variable"):
+            for remote in api.list_objects_typed(kind):
+                remote_name = remote.get("Name")
+                if not isinstance(remote_name, str):
+                    continue
+                if (kind, remote_name) in declared_names:
+                    continue
+                if not _is_managed(remote):
+                    continue
+                remote_canonical = to_canonical_from_automic(kind, remote)
+                deletes.append(
+                    compute_diff(
+                        kind=kind,
+                        name=remote_name,
+                        folder=remote.get("Folder", ""),
+                        desired=None,
+                        actual=remote_canonical,
+                    ),
+                )
+
+    return Plan(creates=creates, updates=updates, deletes=deletes, noops=noops)
+
+
+__all__ = ["Plan", "build_plan", "build_plan_parallel"]

@@ -18,29 +18,39 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
-from typing import Generic, TypeVar, cast
+from typing import Any, Generic, TypeVar, cast
 
 T = TypeVar("T")
 R = TypeVar("R")
 
 
-@dataclass(frozen=True)
 class ParallelExecutionError(Exception, Generic[T]):
     """Raised when one or more items fail inside ``parallel_map``.
 
     ``failures`` preserves input-order for deterministic reporting so the
     caller can point a user at the exact items that blew up without
     having to re-derive positions.
+
+    Not a frozen dataclass: Python writes ``__traceback__`` on the raise
+    instance, which a frozen dataclass refuses. The attribute is treated
+    as immutable by convention — callers inspect but never mutate it.
     """
 
-    failures: Sequence[tuple[T, Exception]] = field(default_factory=tuple)
+    def __init__(
+        self, failures: Sequence[tuple[T, Exception]] = (),
+    ) -> None:
+        super().__init__(self._format(failures))
+        self.failures: Sequence[tuple[T, Exception]] = tuple(failures)
 
-    def __str__(self) -> str:
-        count = len(self.failures)
-        first = self.failures[0][1] if self.failures else None
+    @staticmethod
+    def _format(failures: Sequence[tuple[Any, Exception]]) -> str:
+        count = len(failures)
+        first = failures[0][1] if failures else None
         preview = f"; first error: {first!r}" if first is not None else ""
         return f"{count} parallel task(s) failed{preview}"
+
+    def __str__(self) -> str:
+        return self._format(self.failures)
 
 
 _SENTINEL: object = object()

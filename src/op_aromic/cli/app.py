@@ -29,7 +29,7 @@ from op_aromic.engine.errors import EngineError
 from op_aromic.engine.exporter import Layout
 from op_aromic.engine.exporter import export as export_manifests
 from op_aromic.engine.loader import load_manifests
-from op_aromic.engine.planner import Plan, build_plan
+from op_aromic.engine.planner import Plan, build_plan, build_plan_parallel
 from op_aromic.engine.validator import Issue, Severity, validate_manifests
 
 app = typer.Typer(
@@ -176,6 +176,12 @@ def plan(
     no_color: bool = typer.Option(
         False, "--no-color", help="Suppress ANSI colour codes in rendered output.",
     ),
+    max_workers: int = typer.Option(
+        8,
+        "--max-workers",
+        help="Parallel get_object workers. 1 forces sequential.",
+        min=1,
+    ),
 ) -> None:
     """Show what would change without applying. Read-only.
 
@@ -193,7 +199,13 @@ def plan(
     try:
         with _build_api_client(settings) as client:
             api = AutomicAPI(client)
-            the_plan = build_plan(loaded, api, prune=prune, target=target)
+            the_plan = build_plan_parallel(
+                loaded,
+                api,
+                max_workers=max_workers,
+                prune=prune,
+                target=target,
+            )
     except AutomicError as exc:
         _error_console.print(f"[bold red]API error:[/] {exc}")
         raise typer.Exit(code=1) from exc
