@@ -35,13 +35,6 @@ def test_plan_missing_path_exits_one() -> None:
     assert result.exit_code == 1
 
 
-def test_export_stub() -> None:
-    # Phase-4 stub.
-    result = runner.invoke(app, ["export"])
-    assert result.exit_code == 0
-    assert "Exporting" in result.output
-
-
 def test_main_entrypoint_invokes_app() -> None:
     # Calling main() with --help shouldn't raise; Typer exits on --help.
     import pytest

@@ -26,6 +26,8 @@ from op_aromic.engine.dependency import CyclicDependencyError, build_graph
 from op_aromic.engine.destroyer import destroy as destroy_objects
 from op_aromic.engine.differ import FieldChange, ObjectDiff
 from op_aromic.engine.errors import EngineError
+from op_aromic.engine.exporter import Layout
+from op_aromic.engine.exporter import export as export_manifests
 from op_aromic.engine.loader import load_manifests
 from op_aromic.engine.planner import Plan, build_plan
 from op_aromic.engine.validator import Issue, Severity, validate_manifests
@@ -333,13 +335,105 @@ def apply(
     raise typer.Exit(code=_exit_code_for_apply(result))
 
 
+_VALID_LAYOUTS: tuple[str, ...] = ("by-folder", "by-kind", "flat")
+
+# Module-level singletons to dodge B008: Typer inspects the default value
+# identity to detect option/argument shape, so each must exist as a stable
+# module-level name rather than an inline call in the function signature.
+_OPT_OUTPUT_DIR = typer.Option(
+    "./out", "--output-dir", "-o", help="Output directory for YAML.",
+)
+_OPT_FILTER = typer.Option(
+    None,
+    "--filter",
+    "-f",
+    help="Restrict to one or more manifest kinds (repeatable).",
+)
+_OPT_FOLDER = typer.Option(
+    None,
+    "--folder",
+    help="Restrict to one or more Automic folder paths (repeatable).",
+)
+_OPT_LAYOUT = typer.Option(
+    "by-folder",
+    "--layout",
+    help=f"File layout. One of: {', '.join(_VALID_LAYOUTS)}.",
+)
+_OPT_OVERWRITE = typer.Option(
+    False, "--overwrite", help="Replace existing non-empty files.",
+)
+_OPT_DRY_RUN = typer.Option(
+    False, "--dry-run", help="List what would be written; no HTTP, no files.",
+)
+
+
 @app.command(name="export")
 def export_cmd(
-    output_dir: str = typer.Option(".", "--output-dir", "-o", help="Output directory for YAML."),
-    filter_type: str | None = typer.Option(None, "--filter", "-f", help="Filter by object type."),
+    output_dir: str = _OPT_OUTPUT_DIR,
+    filters: list[str] | None = _OPT_FILTER,
+    folders: list[str] | None = _OPT_FOLDER,
+    layout: str = _OPT_LAYOUT,
+    overwrite: bool = _OPT_OVERWRITE,
+    dry_run: bool = _OPT_DRY_RUN,
 ) -> None:
-    """Export objects from Automic to local YAML files."""
-    typer.echo(f"Exporting to {output_dir}...")
+    """Export Automic objects to local YAML manifests.
+
+    Exit codes:
+      0 — success (including --dry-run)
+      1 — error (bad flag, auth failure, transport failure)
+    """
+    if layout not in _VALID_LAYOUTS:
+        _error_console.print(
+            f"[bold red]ERROR[/] --layout must be one of "
+            f"{', '.join(_VALID_LAYOUTS)}; got {layout!r}",
+        )
+        raise typer.Exit(code=1)
+
+    out_path = Path(output_dir)
+
+    if dry_run:
+        # Zero HTTP calls: just echo the planned configuration. The real
+        # listing happens only when we actually connect, because doing a
+        # partial listing and then discarding it would defeat the purpose
+        # of a dry-run when credentials are missing / auth is expensive.
+        _console.print(
+            f"[bold]dry-run:[/] would export to {out_path} "
+            f"(layout={layout}, kinds={filters or 'all'}, "
+            f"folders={folders or 'all'}, overwrite={overwrite})",
+        )
+        return
+
+    settings = AutomicSettings()
+    try:
+        with _build_api_client(settings) as client:
+            api = AutomicAPI(client)
+            result = export_manifests(
+                api,
+                out_path,
+                kinds=list(filters) if filters else None,
+                folders=list(folders) if folders else None,
+                layout=layout,  # type: ignore[arg-type]
+                overwrite=overwrite,
+            )
+    except AutomicError as exc:
+        _error_console.print(f"[bold red]API error:[/] {exc}")
+        raise typer.Exit(code=1) from exc
+    except ValueError as exc:
+        _error_console.print(f"[bold red]ERROR[/] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    _console.print(
+        f"[bold green]Exported[/] {result.objects_exported} object(s) to "
+        f"{len(result.files_written)} file(s) under {out_path}",
+    )
+    for kind, name, reason in result.skipped:
+        _error_console.print(
+            f"[yellow]SKIP[/] {kind}/{name}: {reason}",
+        )
+
+
+# Re-export so type-checkers see it as used when imported elsewhere.
+_ = Layout
 
 
 @app.command()
