@@ -21,7 +21,10 @@ class Metadata(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    name: Annotated[str, Field(min_length=1, max_length=200)]
+    # Length and character rules live in the engine validator so it can
+    # report all offenders at once with file:line context; the envelope
+    # only enforces non-empty.
+    name: Annotated[str, Field(min_length=1)]
     folder: Annotated[str, Field(min_length=1)]
     client: int | None = None
     annotations: dict[str, str] = Field(default_factory=dict)
