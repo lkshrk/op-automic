@@ -1,0 +1,81 @@
+---
+apiVersion: aromic.io/v1
+kind: Calendar
+metadata:
+  name: WORK.DAYS
+  folder: /PROD/CAL
+spec:
+  title: Workday calendar
+  keywords:
+    - name: WEEKDAY
+      type: WEEKDAY
+      values: [MON, TUE, WED, THU, FRI]
+---
+apiVersion: aromic.io/v1
+kind: Variable
+metadata:
+  name: ETL.CONFIG
+  folder: /PROD/ETL
+spec:
+  var_type: STATIC
+  entries:
+    - key: TARGET_ENV
+      value: PROD
+    - key: RETRIES
+      value: "3"
+---
+apiVersion: aromic.io/v1
+kind: Job
+metadata:
+  name: ETL.EXTRACT
+  folder: /PROD/ETL
+spec:
+  title: Extract source data
+  host: HOST.ETL.01
+  login: LOGIN.ETL.SVC
+  script: /opt/etl/extract.sh
+  script_type: OS
+---
+apiVersion: aromic.io/v1
+kind: Job
+metadata:
+  name: ETL.LOAD
+  folder: /PROD/ETL
+spec:
+  title: Load to warehouse
+  host: HOST.ETL.01
+  login: LOGIN.ETL.SVC
+  script: /opt/etl/load.sh
+---
+apiVersion: aromic.io/v1
+kind: Workflow
+metadata:
+  name: ETL.DAILY
+  folder: /PROD/ETL
+  annotations:
+    aromic.io/managed-by: op-aromic
+spec:
+  title: Daily ETL
+  tasks:
+    - name: STEP.EXTRACT
+      ref:
+        kind: Job
+        name: ETL.EXTRACT
+    - name: STEP.LOAD
+      ref:
+        kind: Job
+        name: ETL.LOAD
+      after: [STEP.EXTRACT]
+---
+apiVersion: aromic.io/v1
+kind: Schedule
+metadata:
+  name: ETL.NIGHTLY
+  folder: /PROD/ETL
+spec:
+  entries:
+    - task:
+        kind: Workflow
+        name: ETL.DAILY
+      start_time: "02:00"
+      calendar_keyword: WEEKDAY

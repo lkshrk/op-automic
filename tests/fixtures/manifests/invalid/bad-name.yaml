@@ -1,0 +1,9 @@
+apiVersion: aromic.io/v1
+kind: Job
+metadata:
+  name: lowercase.bad
+  folder: /PROD/ETL
+spec:
+  host: H
+  login: L
+  script: s

@@ -1,0 +1,20 @@
+---
+apiVersion: aromic.io/v1
+kind: Job
+metadata:
+  name: DUP.JOB
+  folder: /PROD/ETL
+spec:
+  host: H
+  login: L
+  script: s
+---
+apiVersion: aromic.io/v1
+kind: Job
+metadata:
+  name: DUP.JOB
+  folder: /PROD/ETL
+spec:
+  host: H
+  login: L
+  script: s

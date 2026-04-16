@@ -1,0 +1,10 @@
+apiVersion: aromic.io/v1
+kind: Job
+metadata:
+  name: OK.JOB
+  folder: /X
+spec:
+  host: H
+  login: L
+  script: :
+    - - :: broken

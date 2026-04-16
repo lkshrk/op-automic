@@ -1,0 +1,11 @@
+apiVersion: aromic.io/v1
+kind: Workflow
+metadata:
+  name: DANGLE.WF
+  folder: /PROD/ETL
+spec:
+  tasks:
+    - name: STEP.A
+      ref:
+        kind: Job
+        name: NO.SUCH.JOB
