@@ -2,11 +2,18 @@
 
 Raw HTTP wrapper. API-level semantics (None on 404, typed listings with
 pagination handling) live in ``op_aromic.client.api`` on top of this.
+
+Also implements 429-aware retry: Automic exposes a Retry-After header
+(seconds or HTTP-date). We honour it up to ``_MAX_429_RETRIES`` times,
+falling back to a capped exponential backoff when the header is missing
+or malformed. Non-429 errors (including 4xx like 409) are not retried.
 """
 
 from __future__ import annotations
 
+import email.utils as _email_utils
 import logging
+import time
 from collections.abc import Iterator
 from typing import Any, cast
 
@@ -31,6 +38,14 @@ _AUTH_PATH = "/authenticate"
 # replacement per docs/ISSUES.md "PATCH vs PUT for updates"; defaulting to PUT.
 _UPDATE_METHOD = "PUT"
 
+# Maximum total number of attempts per logical request before raising on
+# a persistent 429. "3 attempts" = 1 initial + 2 retries.
+_MAX_429_ATTEMPTS = 3
+
+# Fallback backoff when Retry-After is absent or malformed. One entry per
+# *sleep between attempts*, i.e. (_MAX_429_ATTEMPTS - 1) entries.
+_BACKOFF_SCHEDULE: tuple[float, ...] = (0.5, 1.0)
+
 _STATUS_MAP: dict[int, type[AutomicError]] = {
     404: NotFoundError,
     409: ConflictError,
@@ -38,6 +53,36 @@ _STATUS_MAP: dict[int, type[AutomicError]] = {
 }
 
 _logger = logging.getLogger(__name__)
+
+
+def _parse_retry_after(header_value: str | None, attempt: int) -> float:
+    """Return the number of seconds the caller should sleep before retry.
+
+    Accepts either ``"<seconds>"`` (integer or float string) or an RFC 7231
+    HTTP-date. Anything else falls back to the exponential backoff schedule
+    keyed by attempt index.
+    """
+    if header_value:
+        stripped = header_value.strip()
+        # Integer seconds is the common case per RFC 7231 §7.1.3.
+        try:
+            return max(0.0, float(stripped))
+        except ValueError:
+            pass
+        # HTTP-date — compute delta from now. parsedate_to_datetime raises
+        # ValueError on malformed input; treat that as "unknown, back off".
+        try:
+            parsed = _email_utils.parsedate_to_datetime(stripped)
+        except (TypeError, ValueError):
+            parsed = None
+        if parsed is not None:
+            delta = parsed.timestamp() - time.time()
+            if delta >= 0:
+                return delta
+    # Fall through to exponential backoff.
+    if 0 <= attempt < len(_BACKOFF_SCHEDULE):
+        return _BACKOFF_SCHEDULE[attempt]
+    return _BACKOFF_SCHEDULE[-1]
 
 
 class AutomicClient:
@@ -78,8 +123,37 @@ class AutomicClient:
             status_code=response.status_code,
         )
 
+    def _send_with_retry(
+        self,
+        method: str,
+        url: str,
+        **kwargs: Any,
+    ) -> httpx.Response:
+        """Send an HTTP request, retrying on 429 per Retry-After/backoff.
+
+        Non-429 responses are returned unchanged for the caller's
+        ``_raise_for_status`` mapping to handle. Only 429 triggers the
+        retry loop.
+        """
+        for attempt in range(_MAX_429_ATTEMPTS):
+            response = self._http.request(method, url, **kwargs)
+            if response.status_code != 429:
+                return response
+            if attempt == _MAX_429_ATTEMPTS - 1:
+                return response
+            sleep_for = _parse_retry_after(
+                response.headers.get("Retry-After"), attempt,
+            )
+            _logger.warning(
+                "429 from %s %s; sleeping %.2fs before retry %d/%d",
+                method, url, sleep_for, attempt + 1, _MAX_429_ATTEMPTS - 1,
+            )
+            time.sleep(sleep_for)
+        # Unreachable: the loop always returns on the last attempt.
+        return response  # pragma: no cover
+
     def get_object(self, name: str) -> dict[str, Any]:
-        response = self._http.get(f"{self._base}/objects/{name}")
+        response = self._send_with_retry("GET", f"{self._base}/objects/{name}")
         self._raise_for_status(response)
         return cast(dict[str, Any], response.json())
 
@@ -95,12 +169,14 @@ class AutomicClient:
             return None
 
     def create_object(self, payload: dict[str, Any]) -> dict[str, Any]:
-        response = self._http.post(f"{self._base}/objects", json=payload)
+        response = self._send_with_retry(
+            "POST", f"{self._base}/objects", json=payload,
+        )
         self._raise_for_status(response)
         return cast(dict[str, Any], response.json())
 
     def update_object(self, name: str, payload: dict[str, Any]) -> dict[str, Any]:
-        response = self._http.request(
+        response = self._send_with_retry(
             _UPDATE_METHOD,
             f"{self._base}/objects/{name}",
             json=payload,
@@ -109,7 +185,9 @@ class AutomicClient:
         return cast(dict[str, Any], response.json())
 
     def delete_object(self, name: str) -> None:
-        response = self._http.delete(f"{self._base}/objects/{name}")
+        response = self._send_with_retry(
+            "DELETE", f"{self._base}/objects/{name}",
+        )
         self._raise_for_status(response)
 
     def list_objects(
@@ -125,7 +203,9 @@ class AutomicClient:
             params["folder"] = folder
 
         while True:
-            response = self._http.get(f"{self._base}/objects", params=params)
+            response = self._send_with_retry(
+                "GET", f"{self._base}/objects", params=params,
+            )
             self._raise_for_status(response)
             data = response.json()
             objects = data.get("data", [])

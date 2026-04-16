@@ -125,6 +125,8 @@ def test_update_uses_put_method() -> None:
 
 
 def test_rate_limit_maps_to_rate_limit_error() -> None:
+    # Three consecutive 429s (no Retry-After) → retry with exponential
+    # backoff, then raise RateLimitError.
     settings = _make_settings()
     base = f"{settings.url}/{settings.client_id}"
     with respx.mock(assert_all_called=False) as mock:
@@ -134,6 +136,106 @@ def test_rate_limit_maps_to_rate_limit_error() -> None:
         )
         with AutomicClient(settings) as client, pytest.raises(RateLimitError):
             client.get_object("R")
+
+
+def test_rate_limit_retry_with_retry_after_seconds(monkeypatch: pytest.MonkeyPatch) -> None:
+    # First response 429 with Retry-After: 1 → second succeeds.
+    sleeps: list[float] = []
+    monkeypatch.setattr("op_aromic.client.http.time.sleep", sleeps.append)
+
+    settings = _make_settings()
+    base = f"{settings.url}/{settings.client_id}"
+    with respx.mock(assert_all_called=False) as mock:
+        _mock_auth(mock, settings)
+        call_count = {"n": 0}
+
+        def responder(request: httpx.Request) -> httpx.Response:
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                return httpx.Response(429, headers={"Retry-After": "1"}, text="wait")
+            return httpx.Response(200, json={"Name": "R"})
+
+        mock.get(f"{base}/objects/R").mock(side_effect=responder)
+        with AutomicClient(settings) as client:
+            result = client.get_object("R")
+    assert result == {"Name": "R"}
+    assert sleeps == [1.0]
+
+
+def test_rate_limit_retry_with_http_date(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Retry-After as an HTTP-date 2 seconds into the future.
+    import email.utils as eut
+    import time as real_time
+
+    sleeps: list[float] = []
+    monkeypatch.setattr("op_aromic.client.http.time.sleep", sleeps.append)
+    # Freeze time() so the parser's delta is predictable.
+    monkeypatch.setattr(
+        "op_aromic.client.http.time.time",
+        lambda: 1_000_000.0,
+    )
+    future_http_date = eut.formatdate(1_000_000.0 + 2.0, usegmt=True)
+    del real_time  # only needed indirectly above
+
+    settings = _make_settings()
+    base = f"{settings.url}/{settings.client_id}"
+    with respx.mock(assert_all_called=False) as mock:
+        _mock_auth(mock, settings)
+        calls = {"n": 0}
+
+        def responder(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return httpx.Response(
+                    429, headers={"Retry-After": future_http_date}, text="wait",
+                )
+            return httpx.Response(200, json={"Name": "R"})
+
+        mock.get(f"{base}/objects/R").mock(side_effect=responder)
+        with AutomicClient(settings) as client:
+            result = client.get_object("R")
+    assert result == {"Name": "R"}
+    # Allow minor float slop: we expect ~2.0s.
+    assert len(sleeps) == 1
+    assert 1.9 <= sleeps[0] <= 2.1
+
+
+def test_rate_limit_malformed_retry_after_falls_back_to_backoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Malformed Retry-After → exponential backoff 0.5, 1.0, then raise.
+    sleeps: list[float] = []
+    monkeypatch.setattr("op_aromic.client.http.time.sleep", sleeps.append)
+
+    settings = _make_settings()
+    base = f"{settings.url}/{settings.client_id}"
+    with respx.mock(assert_all_called=False) as mock:
+        _mock_auth(mock, settings)
+        mock.get(f"{base}/objects/R").mock(
+            return_value=httpx.Response(
+                429, headers={"Retry-After": "not-a-number"}, text="wait",
+            ),
+        )
+        with AutomicClient(settings) as client, pytest.raises(RateLimitError):
+            client.get_object("R")
+    assert sleeps == [0.5, 1.0]
+
+
+def test_non_429_4xx_is_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr("op_aromic.client.http.time.sleep", sleeps.append)
+
+    settings = _make_settings()
+    base = f"{settings.url}/{settings.client_id}"
+    with respx.mock(assert_all_called=False) as mock:
+        _mock_auth(mock, settings)
+        route = mock.get(f"{base}/objects/X").mock(
+            return_value=httpx.Response(409, text="exists"),
+        )
+        with AutomicClient(settings) as client, pytest.raises(ConflictError):
+            client.get_object("X")
+    assert route.call_count == 1
+    assert sleeps == []
 
 
 def test_auth_failure_401_raises_auth_error() -> None:
