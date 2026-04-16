@@ -24,6 +24,7 @@ Scratchpad populated during autonomous implementation. Each entry:
 - **Context**: `update_object` uses PATCH. Automic typically requires full-body PUT.
 - **Default chosen**: assume PUT with full merged payload; switch in Phase 3 applier.
 - **Resolution needed**: live verification.
+- **2026-04-17 (Phase 2)**: Flipped `update_object` to use `_UPDATE_METHOD = "PUT"` in `src/op_aromic/client/http.py`. Constant is module-level so a future flip back to PATCH is a one-liner. (commit hash recorded when committing this group.)
 
 ### Automic JSON field shape
 - **Phase**: 2
@@ -51,11 +52,11 @@ Scratchpad populated during autonomous implementation. Each entry:
 ## Surfaced during implementation
 
 ### Pre-existing mypy errors in client/*
-- **Phase**: 1 (surfaced)
+- **Phase**: 1 (surfaced) — **resolved in Phase 2 (2026-04-17)**
 - **Severity**: medium
 - **Context**: `mypy --strict src/` reports 4 errors in `src/op_aromic/client/auth.py` and `src/op_aromic/client/http.py` (`name-defined` for `httpx.Auth.EventHook`, 3x `no-any-return`). These existed in the scaffold before Phase 1 work and sit in code explicitly out of scope for Phase 1.
 - **Default chosen**: left as-is; Phase 2 owns the client rewrite.
-- **Resolution needed**: fix when Phase 2 touches `client/http.py` and `client/auth.py`.
+- **Resolution**: `EventHook` replaced with `Generator[httpx.Request, httpx.Response, None]`; `no-any-return` resolved by `cast(dict[str, Any], response.json())`.
 
 ### Metadata length/character rules moved to validator
 - **Phase**: 1
