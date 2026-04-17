@@ -91,6 +91,33 @@ def summarise_destroy(result: DestroyResult, console: Console | None = None) -> 
     )
 
 
+# Hint mapping: map substrings in FailedApply.reason → one-line operator
+# hint. First match wins; order matters (more specific before more general).
+# Hints are appended in gray `[hint: ...]` after the failure line.
+_FAILURE_HINTS: tuple[tuple[str, str], ...] = (
+    ("401", "check credentials; run `aromic auth check`"),
+    ("Unauthorized", "check credentials; run `aromic auth check`"),
+    ("403", "user lacks permission on this object; check Automic role"),
+    ("Forbidden", "user lacks permission on this object; check Automic role"),
+    ("auto_create_folders", "pass --auto-create-folders=true or create FOLD first"),
+    ("Folder", "verify metadata.folder exists in Automic or enable auto-create"),
+    ("concurrent edit detected", "someone changed the object; re-plan or pass --force"),
+    ("429", "rate limited; raise retry_statuses/retry_base_delay_ms in aromic.yaml"),
+    ("Too Many Requests", "rate limited; raise retry settings in aromic.yaml"),
+    ("500", "server error; check Automic logs and retry"),
+    ("502", "server error; check Automic logs and retry"),
+    ("503", "server error; check Automic logs and retry"),
+)
+
+
+def failure_hint(reason: str) -> str | None:
+    """Return a one-line hint for a FailedApply.reason, or None."""
+    for needle, hint in _FAILURE_HINTS:
+        if needle in reason:
+            return hint
+    return None
+
+
 def preview_destroy(
     result: DestroyResult, console: Console | None = None,
 ) -> None:
@@ -116,6 +143,7 @@ def preview_destroy(
 __all__ = [
     "confirm_apply",
     "confirm_destroy",
+    "failure_hint",
     "preview_destroy",
     "print_apply_result",
     "summarise_destroy",

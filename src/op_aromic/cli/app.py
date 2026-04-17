@@ -14,6 +14,7 @@ from op_aromic.cli.output import envelope, plan_to_json_dict, render_plan
 from op_aromic.cli.prompts import (
     confirm_apply,
     confirm_destroy,
+    failure_hint,
     preview_destroy,
     summarise_destroy,
 )
@@ -669,6 +670,9 @@ def apply(
         _error_console.print(
             f"[red]FAIL[/] {failure.kind}/{failure.name}: {failure.reason}",
         )
+        hint = failure_hint(failure.reason)
+        if hint is not None:
+            _error_console.print(f"  [dim]hint:[/] {hint}")
     raise typer.Exit(code=_exit_code_for_apply(result))
 
 
@@ -974,6 +978,9 @@ def destroy(
         _error_console.print(
             f"[red]FAIL[/] {failure.kind}/{failure.name}: {failure.reason}",
         )
+        hint = failure_hint(failure.reason)
+        if hint is not None:
+            _error_console.print(f"  [dim]hint:[/] {hint}")
     for refusal in result.refused:
         _error_console.print(
             f"[yellow]REFUSED[/] {refusal.kind}/{refusal.name}: {refusal.reason}",
