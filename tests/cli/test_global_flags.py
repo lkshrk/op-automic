@@ -9,6 +9,7 @@ accepted *before or after* the subcommand — users expect both
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,16 @@ from typer.testing import CliRunner
 from op_aromic.cli.app import app
 
 FIXTURES = Path(__file__).parent.parent / "fixtures" / "manifests"
+
+# Rich may wrap option flags in ANSI escape sequences when colour is
+# forced on (GitHub Actions sets FORCE_COLOR), which splits substrings
+# like ``--log-level`` into ``--log`` + ``-level`` across escape codes.
+# Strip ANSI before substring assertions so the test is colour-agnostic.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _strip_ansi(text: str) -> str:
+    return _ANSI_RE.sub("", text)
 
 
 @pytest.fixture(autouse=True)
@@ -78,9 +89,10 @@ def test_global_flags_appear_in_help() -> None:
     runner = CliRunner()
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
-    assert "--log-level" in result.output
-    assert "--log-format" in result.output
-    assert "--output" in result.output
+    output = _strip_ansi(result.output)
+    assert "--log-level" in output
+    assert "--log-format" in output
+    assert "--output" in output
 
 
 def test_log_format_json_emits_parseable_stderr_lines(
