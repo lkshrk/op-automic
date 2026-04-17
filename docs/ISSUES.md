@@ -48,6 +48,13 @@ Scratchpad populated during autonomous implementation. Each entry:
 - **Default chosen**: keep current shape; add `_paginate` helper.
 - **Resolution needed**: verify against AWA REST docs.
 
+### Response envelope (single-object GET) — partially resolved
+- **Phase**: 6 (B3)
+- **Severity**: medium
+- **Context**: Automic AE REST v21 wraps single-object GETs in `{total, data:{<kind_lower>:{...}}, path, client, hasmore}`. Previous code would return the outer envelope dict to callers expecting the inner object.
+- **Default chosen**: `_unwrap_v21_envelope` in `client/api.py` detects the envelope (total + data dict + client keys) and extracts the inner `data.<kind_key>` dict. Flat responses pass through unchanged for backward compat with test fixtures and non-standard instances.
+- **Resolution needed**: the normalizer (`engine/normalizer.py`) still expects the flat `{"Name": ..., "Type": ...}` shape from legacy fixtures. Once real API captures are available, update `from_automic` handlers for v21 nested structure (`general_attributes`, `scripts`, etc.).
+
 ---
 
 ## Surfaced during implementation

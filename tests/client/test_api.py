@@ -1,4 +1,4 @@
-"""Tests for AutomicAPI — typed wrappers, pagination, 404 handling."""
+"""Tests for AutomicAPI — typed wrappers, pagination, 404 handling, envelope unwrap."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import httpx
 import pytest
 import respx
 
-from op_aromic.client.api import AutomicAPI
+from op_aromic.client.api import AutomicAPI, _unwrap_v21_envelope
 from op_aromic.client.http import _AUTH_PATH, AutomicClient
 from op_aromic.config.settings import AutomicSettings
 
@@ -118,6 +118,93 @@ def test_object_exists_true() -> None:
         with AutomicClient(settings) as client:
             api = AutomicAPI(client)
             assert api.object_exists("X") is True
+
+
+def test_get_object_typed_unwraps_v21_envelope_jobs() -> None:
+    """v21 envelope {total, data:{jobs:{...}}, ...} → inner dict."""
+    inner = {
+        "general_attributes": {"name": "MY.JOB", "type": "JOBS"},
+        "scripts": [],
+    }
+    envelope = {"total": 1, "data": {"jobs": inner}, "path": "", "client": 100, "hasmore": False}
+    settings = _make_settings()
+    base = f"{settings.url}/{settings.client_id}"
+    with respx.mock(assert_all_called=False) as mock:
+        _mock_auth(mock, settings)
+        mock.get(f"{base}/objects/MY.JOB").mock(
+            return_value=httpx.Response(200, json=envelope),
+        )
+        with AutomicClient(settings) as client:
+            api = AutomicAPI(client)
+            result = api.get_object_typed("Job", "MY.JOB")
+    assert result == inner
+
+
+def test_get_object_typed_unwraps_v21_envelope_jobp() -> None:
+    """v21 envelope for Workflow kind → jobp inner key."""
+    inner = {"general_attributes": {"name": "MY.WF", "type": "JOBP"}}
+    envelope = {"total": 1, "data": {"jobp": inner}, "path": "", "client": 100, "hasmore": False}
+    settings = _make_settings()
+    base = f"{settings.url}/{settings.client_id}"
+    with respx.mock(assert_all_called=False) as mock:
+        _mock_auth(mock, settings)
+        mock.get(f"{base}/objects/MY.WF").mock(
+            return_value=httpx.Response(200, json=envelope),
+        )
+        with AutomicClient(settings) as client:
+            api = AutomicAPI(client)
+            result = api.get_object_typed("Workflow", "MY.WF")
+    assert result == inner
+
+
+def test_get_object_typed_flat_response_passes_through() -> None:
+    """Flat (non-envelope) responses are returned unchanged."""
+    flat = {"Name": "FOO", "Type": "JOBS"}
+    settings = _make_settings()
+    base = f"{settings.url}/{settings.client_id}"
+    with respx.mock(assert_all_called=False) as mock:
+        _mock_auth(mock, settings)
+        mock.get(f"{base}/objects/FOO").mock(
+            return_value=httpx.Response(200, json=flat),
+        )
+        with AutomicClient(settings) as client:
+            api = AutomicAPI(client)
+            result = api.get_object_typed("Job", "FOO")
+    assert result == flat
+
+
+# --- Unit tests for _unwrap_v21_envelope ---
+
+
+def test_unwrap_v21_envelope_extracts_vara() -> None:
+    inner = {"general_attributes": {"name": "VAR", "type": "VARA"}}
+    envelope = {"total": 1, "data": {"vara": inner}, "path": "", "client": 100, "hasmore": False}
+    assert _unwrap_v21_envelope(envelope, "Variable") == inner
+
+
+def test_unwrap_v21_envelope_extracts_cale() -> None:
+    inner = {"general_attributes": {"name": "CAL", "type": "CALE"}}
+    envelope = {"total": 1, "data": {"cale": inner}, "path": "", "client": 100, "hasmore": False}
+    assert _unwrap_v21_envelope(envelope, "Calendar") == inner
+
+
+def test_unwrap_v21_envelope_extracts_jsch() -> None:
+    inner = {"general_attributes": {"name": "SCH", "type": "JSCH"}}
+    envelope = {"total": 1, "data": {"jsch": inner}, "path": "", "client": 100, "hasmore": False}
+    assert _unwrap_v21_envelope(envelope, "Schedule") == inner
+
+
+def test_unwrap_v21_envelope_flat_passes_through() -> None:
+    flat = {"Name": "X", "Type": "JOBS"}
+    assert _unwrap_v21_envelope(flat, "Job") == flat
+
+
+def test_unwrap_v21_envelope_missing_key_returns_data_dict() -> None:
+    # Envelope present but inner key not in data → return data dict and log warning.
+    data = {"unexpected_key": {"a": 1}}
+    envelope = {"total": 1, "data": data, "path": "", "client": 100, "hasmore": False}
+    result = _unwrap_v21_envelope(envelope, "Job")
+    assert result == data
 
 
 def test_object_exists_false() -> None:
