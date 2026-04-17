@@ -23,3 +23,7 @@ class ConflictError(AutomicError):
 
 class RateLimitError(AutomicError):
     """API rate limit exceeded."""
+
+
+class FolderMissingError(AutomicError):
+    """Target folder path does not exist and auto_create_folders is False."""

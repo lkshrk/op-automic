@@ -22,7 +22,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from op_aromic.client.errors import NotFoundError
+from op_aromic.client.errors import FolderMissingError, NotFoundError
 from op_aromic.client.http import AutomicClient
 from op_aromic.engine.dependency import (
     _KIND_PRECEDENCE,  # reused for stable apply order when the plan lacks a graph
@@ -288,6 +288,7 @@ def apply(
     force: bool = False,
     on_progress: ProgressCallback | None = None,
     plan_markers: PlanMarkers | None = None,
+    auto_create_folders: bool = True,
 ) -> ApplyResult:
     """Execute ``plan`` against ``client`` in two passes (upsert, wire).
 
@@ -296,12 +297,18 @@ def apply(
     ``engine.destroyer`` is the canonical destroy path; applier-driven
     deletes only happen when ``plan.deletes`` is populated via
     ``planner --prune``.
+
+    When ``auto_create_folders=False``, the first object in a folder path
+    not yet seen this run produces a ``FailedApply`` with a
+    ``FolderMissingError`` message rather than attempting the write.
     """
     progress = on_progress or _noop_progress
     successes: list[SuccessfulApply] = []
     failures: list[FailedApply] = []
     skipped: list[Skipped] = []
     markers = plan_markers or {}
+    # Track folders encountered so far this run to detect first-object-in-new-folder.
+    _seen_folders: set[str] = set()
 
     # ---- Deletes (simple single-pass) ----------------------------------
     for diff in plan.deletes:
@@ -372,6 +379,28 @@ def apply(
             if _payloads_differ(full_payload, stripped):
                 pass2_needed.append((diff, full_payload))
             continue
+
+        # Guard: when auto_create_folders=False, refuse to write the first
+        # object in a folder path not yet seen this run. This surfaces a clear
+        # FolderMissingError rather than a cryptic API error.
+        folder = diff.folder or ""
+        if not auto_create_folders and folder not in _seen_folders:
+            err = FolderMissingError(
+                f"Folder {folder!r} does not exist and auto_create_folders=False. "
+                "Create the folder first or set auto_create_folders=True.",
+                status_code=None,
+            )
+            failures.append(
+                FailedApply(
+                    kind=diff.kind,
+                    name=diff.name,
+                    action="create" if diff.action == "create" else "update",
+                    reason=str(err),
+                ),
+            )
+            pass1_failed = True
+            continue
+        _seen_folders.add(folder)
 
         # Creates have no baseline marker; only check updates where the
         # caller (CLI) captured a plan-time marker.

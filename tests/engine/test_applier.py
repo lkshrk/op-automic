@@ -637,3 +637,78 @@ def test_successful_apply_is_frozen() -> None:
     success = SuccessfulApply(kind="Job", name="X", action="create")
     with pytest.raises(dataclasses.FrozenInstanceError):
         success.name = "Y"  # type: ignore[misc]
+
+
+def test_apply_auto_create_folders_false_first_object_in_new_folder_fails() -> None:
+    """When auto_create_folders=False the first object in a previously unseen
+    folder path is blocked with FolderMissingError, not forwarded to the API."""
+    settings = AutomicSettings(
+        url="http://apply.test/ae/api/v1",
+        client_id=100,
+        user="U",
+        department="D",
+        password="pw",
+        verify_ssl=False,
+        max_retries=0,
+        auto_create_folders=False,
+        update_method="PUT",
+    )
+    base = f"{settings.url}/{settings.client_id}"
+    loaded = [_loaded_job("J1")]  # folder=/PROD — new to this run
+
+    with respx.mock(assert_all_called=False) as mock:
+        _mock_auth(mock, settings)
+        mock.get(f"{base}/objects/J1").mock(return_value=httpx.Response(404))
+        post_route = mock.post(f"{base}/objects").mock(
+            return_value=httpx.Response(201, json={"Name": "J1"}),
+        )
+        with AutomicClient(settings) as client:
+            api = AutomicAPI(client)
+            plan = build_plan(loaded, api)
+            graph = build_graph(loaded)
+            result = apply(plan, client, graph, auto_create_folders=False)
+
+    # No write to the API.
+    assert not post_route.called
+    assert result.status == "partial"
+    assert len(result.failures) == 1
+    failure = result.failures[0]
+    assert failure.name == "J1"
+    assert "auto_create_folders" in failure.reason
+
+
+def test_apply_auto_create_folders_false_second_object_in_same_folder_succeeds() -> None:
+    """Once a folder is seen in this run, subsequent objects in the same
+    folder pass the guard even when auto_create_folders=False."""
+    settings = AutomicSettings(
+        url="http://apply.test/ae/api/v1",
+        client_id=100,
+        user="U",
+        department="D",
+        password="pw",
+        verify_ssl=False,
+        max_retries=0,
+        auto_create_folders=False,
+        update_method="PUT",
+    )
+    base = f"{settings.url}/{settings.client_id}"
+    # Two jobs in the same folder; only the first should be blocked.
+    loaded = [_loaded_job("J1"), _loaded_job("J2")]
+
+    with respx.mock(assert_all_called=False) as mock:
+        _mock_auth(mock, settings)
+        mock.get(f"{base}/objects/J1").mock(return_value=httpx.Response(404))
+        mock.get(f"{base}/objects/J2").mock(return_value=httpx.Response(404))
+        post_route = mock.post(f"{base}/objects").mock(
+            return_value=httpx.Response(201, json={"Name": "x"}),
+        )
+        with AutomicClient(settings) as client:
+            api = AutomicAPI(client)
+            plan = build_plan(loaded, api)
+            graph = build_graph(loaded)
+            result = apply(plan, client, graph, auto_create_folders=False)
+
+    # First object blocked; pass1_failed=True → second skipped.
+    assert result.status == "partial"
+    assert len(result.failures) == 1
+    assert not post_route.called
