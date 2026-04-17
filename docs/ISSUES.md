@@ -158,3 +158,17 @@ Scratchpad populated during autonomous implementation. Each entry:
 - **Default chosen**: accept either shape; exporter / applier will write into `Documentation` so plan can detect managed orphans on `--prune`.
 - **Resolution needed**: pick one canonical location once a live instance shows which fields survive round-tripping.
 
+
+### `aromic auth check` is the manual verification for the auth URL
+- **Phase**: 5
+- **Severity**: medium
+- **Context**: `_AUTH_PATH = "/authenticate"` is concatenated onto the
+  configured `AUTOMIC_URL` (which already contains `/ae/api/v1`). We have
+  not verified this shape against a live AWA instance — Broadcom docs
+  hint at `/authenticate` but different versions may prefix or rename it.
+- **Default chosen**: keep `/authenticate`; ship `aromic auth check` as
+  the one-shot probe operators run against their instance to confirm the
+  URL shape and credential mapping work end-to-end before depending on
+  `plan`/`apply` in automation.
+- **Resolution needed**: track the first failing live run; update
+  `_AUTH_PATH` or the settings docs once the real shape is known.

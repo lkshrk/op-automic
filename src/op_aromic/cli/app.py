@@ -867,5 +867,70 @@ def destroy(
     raise typer.Exit(code=0 if result.status == "success" else 2)
 
 
+auth_app = typer.Typer(
+    name="auth",
+    help="Debug helpers for Automic authentication.",
+    no_args_is_help=True,
+)
+app.add_typer(auth_app, name="auth")
+
+
+@auth_app.command("check")
+def auth_check(
+    ctx: typer.Context,
+) -> None:
+    """Verify credentials authenticate against the configured Automic URL.
+
+    Issues a single cheap read call (``list_objects``) which forces the
+    bearer-token flow to run. Reports nothing but success/failure — no
+    mutation, no object listing, no secrets echoed.
+
+    Exit codes:
+      0 — authentication succeeded
+      1 — authentication or transport failure
+    """
+    output_mode = _output_mode(ctx)
+    settings = AutomicSettings()
+    try:
+        with _build_api_client(settings) as client:
+            # Consuming one iteration of list_objects forces the auth
+            # flow to run and exercises a single cheap GET. An empty
+            # result set is still a success — we only care that the
+            # bearer token was acceptable.
+            iterator = client.list_objects()
+            next(iterator, None)
+    except AutomicError as exc:
+        if output_mode == "json":
+            _emit_json(
+                envelope(
+                    command="auth.check",
+                    status="errors",
+                    summary={"error": str(exc), "url": settings.url},
+                ),
+            )
+        else:
+            _error_console.print(f"[bold red]auth failed:[/] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    if output_mode == "json":
+        _emit_json(
+            envelope(
+                command="auth.check",
+                status="ok",
+                summary={
+                    "url": settings.url,
+                    "client_id": settings.client_id,
+                    "user": settings.user,
+                },
+            ),
+        )
+        return
+
+    _console.print(
+        f"[bold green]OK[/] authenticated against {settings.url} "
+        f"(client={settings.client_id}, user={settings.user})",
+    )
+
+
 def main() -> None:
     app()
