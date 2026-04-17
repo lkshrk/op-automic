@@ -95,6 +95,22 @@ def _unwrap_v21_envelope(
     return inner
 
 
+def _extract_envelope_path(payload: dict[str, Any]) -> str:
+    """Return the ``path`` field from a v21 response envelope, or ``""`` if absent.
+
+    The ``path`` field carries the Automic folder where the object lives.
+    It is present only on v21-envelope responses; flat legacy payloads
+    have no path field and return empty string.
+    """
+    if (
+        "total" in payload
+        and isinstance(payload.get("data"), dict)
+        and "client" in payload
+    ):
+        return str(payload.get("path") or "")
+    return ""
+
+
 class AutomicAPI:
     """Typed façade around ``AutomicClient``.
 
@@ -112,13 +128,25 @@ class AutomicAPI:
         callers always receive the inner object dict regardless of whether
         the server returns the v21 envelope or a flat legacy response.
 
+        When the v21 envelope is detected, the ``path`` field (Automic
+        folder) is injected into the returned dict as the synthetic key
+        ``_envelope_path`` so that the normalizer and exporter can populate
+        ``metadata.folder`` without re-fetching the envelope.  Flat legacy
+        responses do not carry a path and the key is not injected.
+
         ``kind`` is required so the envelope unwrapper can locate the
         correct inner key (e.g. ``"jobs"`` for kind ``"Job"``).
         """
         raw = self._client.get_object_or_none(name)
         if raw is None:
             return None
-        return _unwrap_v21_envelope(raw, kind)
+        envelope_path = _extract_envelope_path(raw)
+        inner = _unwrap_v21_envelope(raw, kind)
+        if envelope_path:
+            # Inject as synthetic key; normalizer reads this to set folder.
+            # Use a leading underscore to distinguish from real Automic fields.
+            inner = {**inner, "_envelope_path": envelope_path}
+        return inner
 
     def list_objects_typed(
         self,
@@ -150,4 +178,4 @@ class AutomicAPI:
         return self._client.get_object_or_none(name) is not None
 
 
-__all__ = ["AutomicAPI", "_unwrap_v21_envelope"]
+__all__ = ["AutomicAPI", "_extract_envelope_path", "_unwrap_v21_envelope"]

@@ -6,7 +6,7 @@ import httpx
 import pytest
 import respx
 
-from op_aromic.client.api import AutomicAPI, _unwrap_v21_envelope
+from op_aromic.client.api import AutomicAPI, _extract_envelope_path, _unwrap_v21_envelope
 from op_aromic.client.http import _AUTH_PATH, AutomicClient
 from op_aromic.config.settings import AutomicSettings
 
@@ -270,6 +270,58 @@ def test_unwrap_v21_envelope_missing_key_returns_data_dict() -> None:
     envelope = {"total": 1, "data": data, "path": "", "client": 100, "hasmore": False}
     result = _unwrap_v21_envelope(envelope, "Job")
     assert result == data
+
+
+def test_get_object_typed_injects_envelope_path_when_nonempty() -> None:
+    """When the v21 envelope has a non-empty path, _envelope_path is injected."""
+    inner = {"general_attributes": {"name": "MY.JOB", "type": "JOBS"}}
+    envelope = {
+        "total": 1,
+        "data": {"jobs": inner},
+        "path": "EXAMPLES/JOBS",
+        "client": 100,
+        "hasmore": False,
+    }
+    settings = _make_settings()
+    base = f"{settings.url}/{settings.client_id}"
+    with respx.mock(assert_all_called=False) as mock:
+        _mock_auth(mock, settings)
+        mock.get(f"{base}/objects/MY.JOB").mock(
+            return_value=httpx.Response(200, json=envelope),
+        )
+        with AutomicClient(settings) as client:
+            api = AutomicAPI(client)
+            result = api.get_object_typed("Job", "MY.JOB")
+    assert result is not None
+    assert result["_envelope_path"] == "EXAMPLES/JOBS"
+    assert result["general_attributes"]["name"] == "MY.JOB"
+
+
+def test_get_object_typed_no_envelope_path_when_empty() -> None:
+    """When the v21 envelope has an empty path, no _envelope_path key is added."""
+    inner = {"general_attributes": {"name": "MY.JOB", "type": "JOBS"}}
+    envelope = {"total": 1, "data": {"jobs": inner}, "path": "", "client": 100, "hasmore": False}
+    settings = _make_settings()
+    base = f"{settings.url}/{settings.client_id}"
+    with respx.mock(assert_all_called=False) as mock:
+        _mock_auth(mock, settings)
+        mock.get(f"{base}/objects/MY.JOB").mock(
+            return_value=httpx.Response(200, json=envelope),
+        )
+        with AutomicClient(settings) as client:
+            api = AutomicAPI(client)
+            result = api.get_object_typed("Job", "MY.JOB")
+    assert result is not None
+    assert "_envelope_path" not in result
+
+
+def test_extract_envelope_path_v21() -> None:
+    envelope = {"total": 1, "data": {}, "path": "PROD/ETL", "client": 100, "hasmore": False}
+    assert _extract_envelope_path(envelope) == "PROD/ETL"
+
+
+def test_extract_envelope_path_flat_returns_empty() -> None:
+    assert _extract_envelope_path({"Name": "X", "Type": "JOBS"}) == ""
 
 
 def test_object_exists_false() -> None:
