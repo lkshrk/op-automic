@@ -981,27 +981,30 @@ app.add_typer(auth_app, name="auth")
 def auth_check(
     ctx: typer.Context,
 ) -> None:
-    """Verify credentials authenticate against the configured Automic URL.
+    """Verify Basic credentials authenticate against the configured Automic URL.
 
-    Issues a single cheap read call (``list_objects``) which forces the
-    bearer-token flow to run. Reports nothing but success/failure — no
-    mutation, no object listing, no secrets echoed.
+    Issues a single cheap read call (GET /objects/AROMIC_AUTH_PROBE) which
+    Automic will return 404 for a valid credential (the object doesn't exist)
+    or 401 for an invalid one. Both cases are handled: 404 → success,
+    401 → failure. No mutation, no object listing, no secrets echoed.
 
     Exit codes:
-      0 — authentication succeeded
-      1 — authentication or transport failure
+      0 — authentication succeeded (server returned 404 or 200 on probe)
+      1 — authentication or transport failure (401, network error, etc.)
     """
+    import contextlib as _contextlib
+
+    from op_aromic.client.errors import AuthError as _AuthError
+    from op_aromic.client.errors import NotFoundError as _NotFoundError
+
     output_mode = _output_mode(ctx)
     settings = _settings_from_ctx(ctx)
+    _probe_name = "AROMIC_AUTH_PROBE_9X8Y7Z"
     try:
-        with _build_api_client(settings) as client:
-            # Consuming one iteration of list_objects forces the auth
-            # flow to run and exercises a single cheap GET. An empty
-            # result set is still a success — we only care that the
-            # bearer token was acceptable.
-            iterator = client.list_objects()
-            next(iterator, None)
-    except AutomicError as exc:
+        with _build_api_client(settings) as client, _contextlib.suppress(_NotFoundError):
+            # 404 means auth succeeded (object absent); 401 raises AuthError.
+            client.get_object(_probe_name)
+    except (_AuthError, AutomicError) as exc:
         if output_mode == "json":
             _emit_json(
                 envelope(

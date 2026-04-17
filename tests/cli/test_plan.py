@@ -16,7 +16,6 @@ import respx
 from typer.testing import CliRunner
 
 from op_aromic.cli.app import app
-from op_aromic.client.http import _AUTH_PATH
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures" / "manifests"
 AUTOMIC_FIXTURES = Path(__file__).resolve().parent.parent / "fixtures" / "automic"
@@ -35,9 +34,8 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _setup_mocks(mock: respx.MockRouter) -> None:
-    mock.post("http://plan.test/ae/api/v1/authenticate").mock(
-        return_value=httpx.Response(200, json={"token": "t", "expires_in": 3600}),
-    )
+    # No /authenticate endpoint in AE REST v21 (Basic auth is inline).
+    pass
 
 
 def _load_fixture(name: str) -> dict:
@@ -169,6 +167,7 @@ def test_plan_target_filter_only_requests_target() -> None:
     assert route.call_count == 1
 
 
-def test_plan_assert_from_constant_auth_path() -> None:
-    # Guards against accidental rename of the auth path constant during refactor.
-    assert _AUTH_PATH == "/authenticate"
+def test_plan_auth_constant_is_legacy() -> None:
+    # _AUTH_PATH is a legacy stub; Basic auth is now used directly.
+    from op_aromic.client.http import _AUTH_PATH
+    assert _AUTH_PATH == "/authenticate"  # still present for backward compat

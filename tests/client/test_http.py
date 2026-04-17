@@ -298,15 +298,12 @@ def test_non_429_4xx_is_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_auth_failure_401_raises_auth_error() -> None:
+    # With Basic auth the API itself returns 401 on bad credentials.
     settings = _make_settings()
+    base = f"{settings.url}/{settings.client_id}"
     with respx.mock(assert_all_called=False) as mock:
-        mock.post(f"{settings.url}{_AUTH_PATH}").mock(
-            return_value=httpx.Response(401, text="bad creds"),
-        )
-        # Actual failure happens lazily on first request.
-        base = f"{settings.url}/{settings.client_id}"
         mock.get(f"{base}/objects/X").mock(
-            return_value=httpx.Response(200, json={}),
+            return_value=httpx.Response(401, text="Unauthorized"),
         )
         with AutomicClient(settings) as client, pytest.raises(AuthError):
             client.get_object("X")

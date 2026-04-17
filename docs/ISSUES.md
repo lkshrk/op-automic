@@ -159,16 +159,24 @@ Scratchpad populated during autonomous implementation. Each entry:
 - **Resolution needed**: pick one canonical location once a live instance shows which fields survive round-tripping.
 
 
+### Auth method confirmed: HTTP Basic — `/authenticate` removed
+- **Phase**: 6
+- **Severity**: resolved
+- **Context**: `TokenAuth` (bearer-token flow) and the `/authenticate`
+  endpoint stub were removed in commit B1. Automic AE REST v21 uses
+  HTTP Basic authentication only: header `Authorization: Basic <b64>`
+  where the decoded string is `[CLIENT/]USER[/DEPT]:PASSWORD` in
+  ISO-8859-1. `build_auth()` in `client/auth.py` constructs this.
+- **Resolution**: Implemented. `_AUTH_PATH` retained as a legacy stub for
+  backward compatibility only; all active code now uses Basic auth via
+  `build_auth`.
+- **Bearer note**: auth_method=bearer is a NotImplementedError stub for
+  future 24.2+ support.
+
 ### `aromic auth check` is the manual verification for the auth URL
-- **Phase**: 5
-- **Severity**: medium
-- **Context**: `_AUTH_PATH = "/authenticate"` is concatenated onto the
-  configured `AUTOMIC_URL` (which already contains `/ae/api/v1`). We have
-  not verified this shape against a live AWA instance — Broadcom docs
-  hint at `/authenticate` but different versions may prefix or rename it.
-- **Default chosen**: keep `/authenticate`; ship `aromic auth check` as
-  the one-shot probe operators run against their instance to confirm the
-  URL shape and credential mapping work end-to-end before depending on
-  `plan`/`apply` in automation.
-- **Resolution needed**: track the first failing live run; update
-  `_AUTH_PATH` or the settings docs once the real shape is known.
+- **Phase**: 5/6
+- **Severity**: resolved
+- **Context**: updated in Phase 6 (B1) to use GET probe instead of
+  `/authenticate`. `auth check` now sends `GET /{client}/objects/PROBE`
+  and treats 404 as success (good creds), 401 as failure (bad creds).
+- **Resolution needed**: none for v21; 24.2+ bearer support is a Phase 7 item.

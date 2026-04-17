@@ -10,7 +10,8 @@ import respx
 from typer.testing import CliRunner
 
 from op_aromic.cli.app import app
-from op_aromic.client.http import _AUTH_PATH
+
+_PROBE_URL = "http://auth.test/ae/api/v1/100/objects/AROMIC_AUTH_PROBE_9X8Y7Z"
 
 
 @pytest.fixture(autouse=True)
@@ -25,14 +26,12 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_auth_check_ok_human() -> None:
+    """404 on the probe object → auth succeeded (object just doesn't exist)."""
     runner = CliRunner()
     with respx.mock(assert_all_called=False) as mock:
-        mock.post(f"http://auth.test/ae/api/v1{_AUTH_PATH}").mock(
-            return_value=httpx.Response(200, json={"token": "t", "expires_in": 3600}),
-        )
-        # list_objects request — empty page returns nothing, auth succeeds.
-        mock.get("http://auth.test/ae/api/v1/100/objects").mock(
-            return_value=httpx.Response(200, json={"data": []}),
+        # Basic auth: 404 on the probe means credentials were accepted.
+        mock.get(_PROBE_URL).mock(
+            return_value=httpx.Response(404, text="not found"),
         )
         result = runner.invoke(app, ["auth", "check"])
 
@@ -43,11 +42,8 @@ def test_auth_check_ok_human() -> None:
 def test_auth_check_ok_json() -> None:
     runner = CliRunner()
     with respx.mock(assert_all_called=False) as mock:
-        mock.post(f"http://auth.test/ae/api/v1{_AUTH_PATH}").mock(
-            return_value=httpx.Response(200, json={"token": "t", "expires_in": 3600}),
-        )
-        mock.get("http://auth.test/ae/api/v1/100/objects").mock(
-            return_value=httpx.Response(200, json={"data": []}),
+        mock.get(_PROBE_URL).mock(
+            return_value=httpx.Response(404, text="not found"),
         )
         result = runner.invoke(app, ["--output", "json", "auth", "check"])
 
@@ -60,10 +56,11 @@ def test_auth_check_ok_json() -> None:
 
 
 def test_auth_check_failed_auth_exits_one() -> None:
+    """401 from API → AuthError → exit 1."""
     runner = CliRunner()
     with respx.mock(assert_all_called=False) as mock:
-        mock.post(f"http://auth.test/ae/api/v1{_AUTH_PATH}").mock(
-            return_value=httpx.Response(401, text="nope"),
+        mock.get(_PROBE_URL).mock(
+            return_value=httpx.Response(401, text="Unauthorized"),
         )
         result = runner.invoke(app, ["--output", "json", "auth", "check"])
 

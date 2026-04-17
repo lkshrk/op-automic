@@ -22,8 +22,9 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from op_aromic.client.auth import TokenAuth
+from op_aromic.client.auth import build_auth
 from op_aromic.client.errors import (
+    AuthError,
     AutomicError,
     ConflictError,
     NotFoundError,
@@ -42,6 +43,7 @@ _AUTH_PATH = "/authenticate"
 _MAX_429_ATTEMPTS = 3
 
 _STATUS_MAP: dict[int, type[AutomicError]] = {
+    401: AuthError,
     404: NotFoundError,
     409: ConflictError,
     429: RateLimitError,
@@ -95,13 +97,8 @@ class AutomicClient:
 
     def __init__(self, settings: AutomicSettings) -> None:
         self._base = f"{settings.url}/{settings.client_id}"
-        # Auth: B1 will replace TokenAuth with build_auth (Basic per swagger v21).
-        auth = TokenAuth(
-            base_url=settings.url,
-            user=settings.user,
-            department=settings.department,
-            password=settings.password.get_secret_value(),
-        )
+        # HTTP Basic auth per swagger v21. Bearer (24.2+) is stubbed in auth.py.
+        auth = build_auth(settings)
         transport = httpx.HTTPTransport(retries=settings.max_retries)
         self._http = httpx.Client(
             auth=auth,
