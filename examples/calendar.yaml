@@ -1,0 +1,15 @@
+apiVersion: aromic.io/v1
+kind: Calendar
+metadata:
+  name: WORK.DAYS
+  folder: PROD/CAL
+spec:
+  keywords:
+    - name: WEEKDAY
+      type: WEEKDAY
+      values:
+        - MON
+        - TUE
+        - WED
+        - THU
+        - FRI

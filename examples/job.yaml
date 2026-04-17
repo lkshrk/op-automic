@@ -1,0 +1,12 @@
+apiVersion: aromic.io/v1
+kind: Job
+metadata:
+  name: UNIX_JOB
+  folder: EXAMPLES/JOBS
+spec:
+  host: UNIX01
+  login: LOGIN.UNIX01
+  script: |
+    sleep 60
+    exit
+  script_type: OS

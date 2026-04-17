@@ -1,0 +1,12 @@
+apiVersion: aromic.io/v1
+kind: Schedule
+metadata:
+  name: ETL.NIGHTLY
+  folder: PROD/ETL
+spec:
+  entries:
+    - task:
+        kind: Workflow
+        name: ETL.DAILY
+      start_time: "02:00"
+      calendar_keyword: WEEKDAY

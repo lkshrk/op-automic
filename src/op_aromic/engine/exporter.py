@@ -64,6 +64,34 @@ _ENVELOPE_FIELDS: frozenset[str] = frozenset(
     {"Name", "Type", "Folder", "Client", "Annotations"},
 )
 
+# v21 nested fields handled by _manifest_envelope and per-kind inverses; never
+# leak into spec.raw.
+_V21_STRUCTURAL_FIELDS: frozenset[str] = frozenset(
+    {"metadata", "general_attributes", "_envelope_path"},
+)
+
+# Map Automic object type → manifest kind.  Shared by per-kind inverse functions.
+_AUTOMIC_TYPE_TO_KIND: dict[str, str] = {
+    "JOBP": "Workflow",
+    "JOBS": "Job",
+    "JSCH": "Schedule",
+    "CALE": "Calendar",
+    "VARA": "Variable",
+    "SCRI": "Script",
+}
+
+
+def _normalise_time_str(raw: str) -> str:
+    """Convert Automic HHMMSS time string to HH:MM for manifest authoring.
+
+    Automic stores times as 6-digit strings (``"020000"`` = 02:00).
+    Already-normalised ``"HH:MM"`` strings pass through unchanged.
+    """
+    s = str(raw or "").strip()
+    if len(s) == 6 and s.isdigit():
+        return f"{s[0:2]}:{s[2:4]}"
+    return s
+
 
 @dataclass(frozen=True)
 class ExportResult:
@@ -96,24 +124,39 @@ def _extract_raw(
     """Return a dict of Automic fields not modelled on the kind's spec.
 
     ``modelled`` is the set of Automic field names the per-kind inverse
-    already consumes explicitly. Everything else — minus the envelope and
-    volatile fields — lands in ``spec.raw`` so the round-trip survives
-    even for fields we have not formally typed.
+    already consumes explicitly. Everything else — minus the envelope,
+    volatile, and v21 structural fields — lands in ``spec.raw`` so the
+    round-trip survives even for fields we have not formally typed.
     """
     ignore = (
         _COMMON_IGNORED
         | IGNORED_FIELDS_BY_KIND.get(kind, frozenset())
         | _ENVELOPE_FIELDS
+        | _V21_STRUCTURAL_FIELDS
         | frozenset(modelled)
     )
     return {k: v for k, v in payload.items() if k not in ignore}
 
 
 def _manifest_envelope(payload: dict[str, Any], kind: str) -> dict[str, Any]:
-    """Reconstruct the top-level manifest envelope (apiVersion + metadata)."""
+    """Reconstruct the top-level manifest envelope (apiVersion + metadata).
+
+    Handles both v21 nested payloads (``general_attributes.name`` +
+    ``_envelope_path`` folder) and legacy flat payloads (``Name`` + ``Folder``).
+    """
+    if "general_attributes" in payload:
+        # v21 nested shape.
+        ga = payload.get("general_attributes") or {}
+        name = ga.get("name", "")
+        folder = payload.get("_envelope_path", "")
+    else:
+        # Legacy flat shape.
+        name = payload.get("Name", "")
+        folder = payload.get("Folder", "")
+
     metadata: dict[str, Any] = {
-        "name": payload["Name"],
-        "folder": payload.get("Folder", ""),
+        "name": name,
+        "folder": folder,
     }
     # ``Client`` is optional on the wire — only surface it when the server
     # echoed one, otherwise the round-trip would introduce a spurious diff.
@@ -131,23 +174,65 @@ def _manifest_envelope(payload: dict[str, Any], kind: str) -> dict[str, Any]:
 
 
 def _inverse_workflow(payload: dict[str, Any]) -> dict[str, Any]:
-    tasks_in = payload.get("Tasks", []) or []
     spec: dict[str, Any] = {}
-    title = payload.get("Title")
-    if title:
-        spec["title"] = title
-    spec["tasks"] = [
-        {
-            "name": t.get("Name"),
-            "ref": {
-                "kind": (t.get("Ref") or {}).get("Kind"),
-                "name": (t.get("Ref") or {}).get("Name"),
-            },
-            "after": list(t.get("After", []) or []),
+    if "general_attributes" in payload:
+        # v21 nested shape: use normalizer to produce the canonical form,
+        # then map that back to a manifest spec.
+        ga = payload.get("general_attributes") or {}
+        title = ga.get("title")
+        if title:
+            spec["title"] = title
+        raw_tasks = [
+            t for t in (payload.get("workflow_definitions") or [])
+            if t.get("object_type") not in ("<START>", "<END>")
+        ]
+        # Build after lists from line_conditions (same logic as normalizer).
+        line_map = {
+            str(t.get("line_number", "")): t.get("object_name", "")
+            for t in raw_tasks
         }
-        for t in tasks_in
-    ]
-    raw = _extract_raw(payload, modelled={"Title", "Tasks"}, kind="Workflow")
+        cond_map: dict[str, list[str]] = {}
+        for lc in (payload.get("line_conditions") or []):
+            wln = str(lc.get("workflow_line_number", ""))
+            pred = str(lc.get("predecessor_line_number", ""))
+            if wln and pred and pred in line_map:
+                cond_map.setdefault(wln, []).append(line_map[pred])
+        spec["tasks"] = [
+            {
+                "name": t.get("object_name", ""),
+                "ref": {
+                    "kind": _AUTOMIC_TYPE_TO_KIND.get(
+                        t.get("object_type", ""), t.get("object_type", ""),
+                    ),
+                    "name": t.get("object_name", ""),
+                },
+                "after": sorted(cond_map.get(str(t.get("line_number", "")), [])),
+            }
+            for t in raw_tasks
+        ]
+        raw = _extract_raw(
+            payload,
+            modelled={"workflow_definitions", "line_conditions", "rollback_definitions",
+                      "workflow_attributes"},
+            kind="Workflow",
+        )
+    else:
+        tasks_in = payload.get("Tasks", []) or []
+        title = payload.get("Title")
+        if title:
+            spec["title"] = title
+        spec["tasks"] = [
+            {
+                "name": t.get("Name"),
+                "ref": {
+                    "kind": (t.get("Ref") or {}).get("Kind"),
+                    "name": (t.get("Ref") or {}).get("Name"),
+                },
+                "after": list(t.get("After", []) or []),
+            }
+            for t in tasks_in
+        ]
+        raw = _extract_raw(payload, modelled={"Title", "Tasks"}, kind="Workflow")
     if raw:
         spec["raw"] = raw
     return spec
@@ -155,75 +240,172 @@ def _inverse_workflow(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _inverse_job(payload: dict[str, Any]) -> dict[str, Any]:
     spec: dict[str, Any] = {}
-    if payload.get("Title"):
-        spec["title"] = payload["Title"]
-    spec["host"] = payload.get("Host", "")
-    spec["login"] = payload.get("Login", "")
-    spec["script"] = payload.get("Script", "")
-    spec["script_type"] = payload.get("ScriptType", "OS")
-    raw = _extract_raw(
-        payload,
-        modelled={"Title", "Host", "Login", "Script", "ScriptType"},
-        kind="Job",
-    )
+    if "general_attributes" in payload:
+        # v21 nested shape.
+        ga = payload.get("general_attributes") or {}
+        ja = payload.get("job_attributes") or {}
+        if ga.get("title"):
+            spec["title"] = ga["title"]
+        spec["host"] = ja.get("agent", "")
+        spec["login"] = ja.get("login", "")
+        # Reconstruct script from scripts[].process blocks.
+        scripts_block = payload.get("scripts") or []
+        lines: list[str] = []
+        for block in scripts_block:
+            if isinstance(block, dict):
+                process = block.get("process")
+                if isinstance(process, list):
+                    lines.extend(str(ln) for ln in process)
+                elif isinstance(process, str):
+                    lines.append(process)
+        spec["script"] = "\n".join(lines)
+        spec["script_type"] = "OS"
+        raw = _extract_raw(
+            payload,
+            modelled={"job_attributes", "scripts", "object_variables", "rollback_definitions"},
+            kind="Job",
+        )
+    else:
+        if payload.get("Title"):
+            spec["title"] = payload["Title"]
+        spec["host"] = payload.get("Host", "")
+        spec["login"] = payload.get("Login", "")
+        spec["script"] = payload.get("Script", "")
+        spec["script_type"] = payload.get("ScriptType", "OS")
+        raw = _extract_raw(
+            payload,
+            modelled={"Title", "Host", "Login", "Script", "ScriptType"},
+            kind="Job",
+        )
     if raw:
         spec["raw"] = raw
     return spec
 
 
 def _inverse_schedule(payload: dict[str, Any]) -> dict[str, Any]:
-    entries_in = payload.get("Entries", []) or []
     spec: dict[str, Any] = {}
-    if payload.get("Title"):
-        spec["title"] = payload["Title"]
-    spec["entries"] = [
-        {
-            "task": {
-                "kind": (e.get("Task") or {}).get("Kind"),
-                "name": (e.get("Task") or {}).get("Name"),
-            },
-            "start_time": e.get("StartTime", "00:00"),
-            "calendar_keyword": e.get("CalendarKeyword") or None,
-        }
-        for e in entries_in
-    ]
-    raw = _extract_raw(payload, modelled={"Title", "Entries"}, kind="Schedule")
+    type_to_kind: dict[str, str] = {
+        "JOBP": "Workflow", "JOBS": "Job", "JSCH": "Schedule",
+        "CALE": "Calendar", "VARA": "Variable", "SCRI": "Script",
+    }
+    if "general_attributes" in payload:
+        # v21 nested shape (best-effort; JSCH real fixture unavailable).
+        ga = payload.get("general_attributes") or {}
+        if ga.get("title"):
+            spec["title"] = ga["title"]
+        raw_entries = payload.get("schedule_definitions") or []
+        spec["entries"] = [
+            {
+                "task": {
+                    "kind": type_to_kind.get(e.get("object_type", ""), e.get("object_type", "")),
+                    "name": e.get("object_name", ""),
+                },
+                "start_time": _normalise_time_str(e.get("start_time", "000000")),
+                "calendar_keyword": e.get("calendar_keyword") or None,
+            }
+            for e in raw_entries
+        ]
+        raw = _extract_raw(
+            payload,
+            modelled={"schedule_definitions", "schedule_attributes"},
+            kind="Schedule",
+        )
+    else:
+        entries_in = payload.get("Entries", []) or []
+        if payload.get("Title"):
+            spec["title"] = payload["Title"]
+        spec["entries"] = [
+            {
+                "task": {
+                    "kind": (e.get("Task") or {}).get("Kind"),
+                    "name": (e.get("Task") or {}).get("Name"),
+                },
+                "start_time": e.get("StartTime", "00:00"),
+                "calendar_keyword": e.get("CalendarKeyword") or None,
+            }
+            for e in entries_in
+        ]
+        raw = _extract_raw(payload, modelled={"Title", "Entries"}, kind="Schedule")
     if raw:
         spec["raw"] = raw
     return spec
 
 
 def _inverse_calendar(payload: dict[str, Any]) -> dict[str, Any]:
-    keywords_in = payload.get("Keywords", []) or []
     spec: dict[str, Any] = {}
-    if payload.get("Title"):
-        spec["title"] = payload["Title"]
-    spec["keywords"] = [
-        {
-            "name": k.get("Name"),
-            "type": k.get("Type", "STATIC"),
-            "values": list(k.get("Values", []) or []),
-        }
-        for k in keywords_in
-    ]
-    raw = _extract_raw(payload, modelled={"Title", "Keywords"}, kind="Calendar")
+    if "general_attributes" in payload:
+        # v21 nested shape (best-effort; CALE real fixture unavailable).
+        ga = payload.get("general_attributes") or {}
+        if ga.get("title"):
+            spec["title"] = ga["title"]
+        raw_keywords = payload.get("calendar_definitions") or []
+        spec["keywords"] = [
+            {
+                "name": k.get("keyword", k.get("name", "")),
+                "type": k.get("type", "STATIC"),
+                "values": list(k.get("entries", k.get("values", [])) or []),
+            }
+            for k in raw_keywords
+        ]
+        raw = _extract_raw(
+            payload,
+            modelled={"calendar_definitions", "calendar_attributes"},
+            kind="Calendar",
+        )
+    else:
+        keywords_in = payload.get("Keywords", []) or []
+        if payload.get("Title"):
+            spec["title"] = payload["Title"]
+        spec["keywords"] = [
+            {
+                "name": k.get("Name"),
+                "type": k.get("Type", "STATIC"),
+                "values": list(k.get("Values", []) or []),
+            }
+            for k in keywords_in
+        ]
+        raw = _extract_raw(payload, modelled={"Title", "Keywords"}, kind="Calendar")
     if raw:
         spec["raw"] = raw
     return spec
 
 
 def _inverse_variable(payload: dict[str, Any]) -> dict[str, Any]:
-    entries_in = payload.get("Entries", []) or []
     spec: dict[str, Any] = {}
-    if payload.get("Title"):
-        spec["title"] = payload["Title"]
-    spec["var_type"] = payload.get("VarType", "STATIC")
-    spec["entries"] = [
-        {"key": e.get("Key"), "value": e.get("Value", "")} for e in entries_in
-    ]
-    raw = _extract_raw(
-        payload, modelled={"Title", "VarType", "Entries"}, kind="Variable",
-    )
+    if "general_attributes" in payload:
+        # v21 nested shape.
+        ga = payload.get("general_attributes") or {}
+        var_def = payload.get("variable_definitions") or {}
+        if ga.get("title"):
+            spec["title"] = ga["title"]
+        spec["var_type"] = ga.get("sub_type") or var_def.get("type", "STATIC")
+        raw_rows = payload.get("static_values") or []
+        entries: list[dict[str, Any]] = []
+        for row in raw_rows:
+            key = row.get("key", "")
+            # Single-column: use 'value' field (manifest model compatibility).
+            # Multi-column: use first value for the canonical 'value' key.
+            # Full multi-column support would require a model extension;
+            # for now fold to value1 for round-trip stability.
+            value = str(row.get("value1", "") or "")
+            entries.append({"key": key, "value": value})
+        spec["entries"] = entries
+        raw = _extract_raw(
+            payload,
+            modelled={"variable_definitions", "static_values"},
+            kind="Variable",
+        )
+    else:
+        entries_in = payload.get("Entries", []) or []
+        if payload.get("Title"):
+            spec["title"] = payload["Title"]
+        spec["var_type"] = payload.get("VarType", "STATIC")
+        spec["entries"] = [
+            {"key": e.get("Key"), "value": e.get("Value", "")} for e in entries_in
+        ]
+        raw = _extract_raw(
+            payload, modelled={"Title", "VarType", "Entries"}, kind="Variable",
+        )
     if raw:
         spec["raw"] = raw
     return spec
@@ -360,7 +542,9 @@ def export(
                 continue
             # Client-side folder filter as a safety net in case the server
             # ignored the ``folder`` query parameter.
-            if folder_set and full.get("Folder") not in folder_set:
+            # Support both v21 nested (folder in _envelope_path) and flat.
+            obj_folder = full.get("_envelope_path") or full.get("Folder", "")
+            if folder_set and obj_folder not in folder_set:
                 continue
             manifests.append(_payload_to_manifest(kind, full))
 

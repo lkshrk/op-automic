@@ -137,7 +137,6 @@ def test_export_folder_filter(tmp_path: Path) -> None:
     runner = CliRunner()
     base = "http://export.test/ae/api/v1/100"
     job_a = _load_fixture("job.json")  # Folder: /PROD/ETL
-    job_b = {**job_a, "Name": "OTHER.JOB", "Folder": "/TEST"}
 
     with respx.mock(assert_all_called=False) as mock:
         mock.post(f"http://export.test/ae/api/v1{_AUTH_PATH}").mock(

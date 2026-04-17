@@ -1,0 +1,12 @@
+apiVersion: aromic.io/v1
+kind: Variable
+metadata:
+  name: STATIC_VARIABLE
+  folder: EXAMPLES/VARAS
+spec:
+  var_type: STATIC
+  entries:
+    - key: Continents
+      value: Asia
+    - key: Planets
+      value: Mars

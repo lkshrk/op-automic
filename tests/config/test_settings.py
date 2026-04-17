@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from op_aromic.config.settings import AutomicSettings
 
@@ -68,14 +69,14 @@ def test_env_override_auth_method(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_invalid_update_method_raises() -> None:
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         AutomicSettings(
             url="http://x", user="u", password="p", update_method="PATCH",  # type: ignore[arg-type]
         )
 
 
 def test_invalid_auth_method_raises() -> None:
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         AutomicSettings(
             url="http://x", user="u", password="p", auth_method="digest",  # type: ignore[arg-type]
         )

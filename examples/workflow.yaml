@@ -1,0 +1,22 @@
+apiVersion: aromic.io/v1
+kind: Workflow
+metadata:
+  name: WORKFLOW
+  folder: EXAMPLES/WORKFLOWS
+spec:
+  tasks:
+    - name: SIMPLE_SCRIPT
+      ref:
+        kind: Script
+        name: SIMPLE_SCRIPT
+      after: []
+    - name: WINDOWS_JOB
+      ref:
+        kind: Job
+        name: WINDOWS_JOB
+      after: []
+    - name: ADVANCED_SCRIPT
+      ref:
+        kind: Script
+        name: ADVANCED_SCRIPT
+      after: []
