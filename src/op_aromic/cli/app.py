@@ -3,11 +3,19 @@
 from __future__ import annotations
 
 import json
+from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Literal
 
 import typer
 from rich.console import Console
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    TextColumn,
+    TimeElapsedColumn,
+)
 
 from op_aromic import __version__
 from op_aromic.cli.output import envelope, plan_to_json_dict, render_plan
@@ -24,6 +32,7 @@ from op_aromic.client.http import AutomicClient
 from op_aromic.config.settings import AutomicSettings
 from op_aromic.engine.applier import (
     ApplyResult,
+    ProgressCallback,
     capture_plan_markers,
 )
 from op_aromic.engine.applier import (
@@ -524,6 +533,70 @@ def _exit_code_for_apply(result: ApplyResult) -> int:
     return 2
 
 
+class _NullProgressCtx(AbstractContextManager["_NullProgressCtx"]):
+    """No-op context manager used when progress output is suppressed.
+
+    Enables the same ``with`` block in ``apply`` regardless of whether a
+    live Rich Progress is driving the bar or not. Avoids a conditional
+    wrapper at every call site.
+    """
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+
+def _make_apply_progress(
+    plan: Plan, *, output_mode: str,
+) -> tuple[ProgressCallback, AbstractContextManager[object]]:
+    """Build a (callback, context_manager) pair for apply progress.
+
+    Progress rendering is skipped in JSON mode (would corrupt the single-
+    document stdout contract) and when there's nothing to do. In both
+    cases a noop callback + null context manager are returned so the
+    apply code path stays uniform.
+
+    Two tasks drive the bar:
+      - "apply" (pass 1 + deletes) — every create/update/delete contributes
+      - "wire"  (pass 2) — only kinds that needed ref-stripping contribute
+
+    ``pass2`` has an upper bound of creates+updates; we size the task at
+    that cap and let advances stop early. The bar's `completed < total` at
+    the end is fine — pass 2 naturally skips refless kinds.
+    """
+    pass1_total = len(plan.creates) + len(plan.updates) + len(plan.deletes)
+    if output_mode == "json" or pass1_total == 0:
+        return lambda _event, _name: None, _NullProgressCtx()
+
+    progress = Progress(
+        TextColumn("[bold blue]{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TextColumn("[dim]{task.fields[current]}"),
+        TimeElapsedColumn(),
+        transient=True,
+    )
+    progress.start()
+    apply_task = progress.add_task(
+        "apply", total=pass1_total, current="",
+    )
+    wire_total = len(plan.creates) + len(plan.updates)
+    wire_task = progress.add_task(
+        "wire", total=wire_total or 1, current="",
+    )
+
+    def _on_progress(event: str, name: str) -> None:
+        if event in ("pass1_apply", "delete"):
+            progress.update(apply_task, advance=1, current=name)
+        elif event == "pass2_apply":
+            progress.update(wire_task, advance=1, current=name)
+
+    class _ProgressCtx(AbstractContextManager["_ProgressCtx"]):
+        def __exit__(self, *_args: object) -> None:
+            progress.stop()
+
+    return _on_progress, _ProgressCtx()
+
+
 @app.command()
 def apply(
     ctx: typer.Context,
@@ -612,14 +685,19 @@ def apply(
                 if dry_run or plan_file is not None
                 else capture_plan_markers(the_plan, client)
             )
-            result = apply_plan(
-                the_plan,
-                client,
-                graph,
-                dry_run=dry_run,
-                force=force,
-                plan_markers=markers,
+            on_progress, progress_ctx = _make_apply_progress(
+                the_plan, output_mode=output_mode,
             )
+            with progress_ctx:
+                result = apply_plan(
+                    the_plan,
+                    client,
+                    graph,
+                    dry_run=dry_run,
+                    force=force,
+                    plan_markers=markers,
+                    on_progress=on_progress,
+                )
     except AutomicError as exc:
         if output_mode == "json":
             _emit_json(
