@@ -1,4 +1,4 @@
-"""Tests for AutomicClient — error mapping, PUT on update, auth URL shape."""
+"""Tests for AutomicClient — error mapping, retry config, auth URL shape."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from op_aromic.client.errors import (
     NotFoundError,
     RateLimitError,
 )
-from op_aromic.client.http import _AUTH_PATH, _UPDATE_METHOD, AutomicClient
+from op_aromic.client.http import _AUTH_PATH, AutomicClient
 from op_aromic.config.settings import AutomicSettings
 
 
@@ -90,9 +90,13 @@ def test_request_logging_emits_structured_event(
     structlog.reset_defaults()
 
 
-def test_update_method_is_put() -> None:
-    # Default assumption per docs/ISSUES.md: Automic requires full-body PUT.
-    assert _UPDATE_METHOD == "PUT"
+def test_update_method_default_is_post_import() -> None:
+    # Default update_method per swagger v21 is POST_IMPORT (stored on instance as "POST").
+    settings = _make_settings()
+    with respx.mock(assert_all_called=False) as mock:
+        _mock_auth(mock, settings)
+        with AutomicClient(settings) as client:
+            assert client._update_method == "POST"
 
 
 def test_get_object_returns_json() -> None:
@@ -157,8 +161,17 @@ def test_create_object_409_raises_conflict() -> None:
             client.create_object({"Name": "X"})
 
 
-def test_update_uses_put_method() -> None:
-    settings = _make_settings()
+def test_update_uses_put_method_when_configured() -> None:
+    settings = AutomicSettings(
+        url="http://example.test/ae/api/v1",
+        client_id=100,
+        user="USER",
+        department="DEPT",
+        password="pw",
+        verify_ssl=False,
+        max_retries=0,
+        update_method="PUT",
+    )
     base = f"{settings.url}/{settings.client_id}"
     with respx.mock(assert_all_called=False) as mock:
         _mock_auth(mock, settings)
@@ -310,6 +323,74 @@ def test_delete_object_sends_delete() -> None:
         with AutomicClient(settings) as client:
             client.delete_object("X")
         assert route.called
+
+
+def test_retry_base_delay_from_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    # retry_base_delay_ms=1000 → first backoff sleep is 1.0s.
+    sleeps: list[float] = []
+    monkeypatch.setattr("op_aromic.client.http.time.sleep", sleeps.append)
+
+    settings = AutomicSettings(
+        url="http://example.test/ae/api/v1",
+        client_id=100,
+        user="USER",
+        department="DEPT",
+        password="pw",
+        verify_ssl=False,
+        max_retries=0,
+        retry_base_delay_ms=1000,
+    )
+    base = f"{settings.url}/{settings.client_id}"
+    with respx.mock(assert_all_called=False) as mock:
+        _mock_auth(mock, settings)
+        calls = {"n": 0}
+
+        def responder(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return httpx.Response(429, text="slow")
+            return httpx.Response(200, json={"Name": "X"})
+
+        mock.get(f"{base}/objects/X").mock(side_effect=responder)
+        with AutomicClient(settings) as client:
+            client.get_object("X")
+
+    assert len(sleeps) == 1
+    assert sleeps[0] == pytest.approx(1.0)
+
+
+def test_retry_custom_statuses(monkeypatch: pytest.MonkeyPatch) -> None:
+    # retry_statuses=[503] → 503 triggers retry, 429 does not.
+    sleeps: list[float] = []
+    monkeypatch.setattr("op_aromic.client.http.time.sleep", sleeps.append)
+
+    settings = AutomicSettings(
+        url="http://example.test/ae/api/v1",
+        client_id=100,
+        user="USER",
+        department="DEPT",
+        password="pw",
+        verify_ssl=False,
+        max_retries=0,
+        retry_statuses=[503],
+    )
+    base = f"{settings.url}/{settings.client_id}"
+    with respx.mock(assert_all_called=False) as mock:
+        _mock_auth(mock, settings)
+        calls = {"n": 0}
+
+        def responder(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return httpx.Response(503, text="unavailable")
+            return httpx.Response(200, json={"Name": "X"})
+
+        mock.get(f"{base}/objects/X").mock(side_effect=responder)
+        with AutomicClient(settings) as client:
+            result = client.get_object("X")
+
+    assert result == {"Name": "X"}
+    assert len(sleeps) == 1  # retried once
 
 
 def test_list_objects_paginates() -> None:

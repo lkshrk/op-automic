@@ -7,6 +7,9 @@ Also implements 429-aware retry: Automic exposes a Retry-After header
 (seconds or HTTP-date). We honour it up to ``_MAX_429_RETRIES`` times,
 falling back to a capped exponential backoff when the header is missing
 or malformed. Non-429 errors (including 4xx like 409) are not retried.
+
+Retry parameters (base delay, cap, status codes) are driven by
+``AutomicSettings`` so operators can tune without code changes.
 """
 
 from __future__ import annotations
@@ -29,23 +32,14 @@ from op_aromic.client.errors import (
 from op_aromic.config.settings import AutomicSettings
 from op_aromic.observability.logging import get_logger
 
-# Path segment appended to the configured base URL (which already contains
-# ``/ae/api/v1``) to obtain the bearer token. The live AWA REST shape is not
-# verified yet — see docs/ISSUES.md "Auth endpoint URL shape". Kept as a named
-# constant so future verification is a single-line flip.
+# Kept for backward compatibility with existing tests; B1 will remove it.
+# Points to the bearer-token endpoint — which does not exist in v21 per
+# swagger (see ISSUES.md "Auth method confirmed"). Removed from active use.
 _AUTH_PATH = "/authenticate"
-
-# HTTP method used for ``update_object``. Automic generally requires a full-body
-# replacement per docs/ISSUES.md "PATCH vs PUT for updates"; defaulting to PUT.
-_UPDATE_METHOD = "PUT"
 
 # Maximum total number of attempts per logical request before raising on
 # a persistent 429. "3 attempts" = 1 initial + 2 retries.
 _MAX_429_ATTEMPTS = 3
-
-# Fallback backoff when Retry-After is absent or malformed. One entry per
-# *sleep between attempts*, i.e. (_MAX_429_ATTEMPTS - 1) entries.
-_BACKOFF_SCHEDULE: tuple[float, ...] = (0.5, 1.0)
 
 _STATUS_MAP: dict[int, type[AutomicError]] = {
     404: NotFoundError,
@@ -62,7 +56,11 @@ def _url_path_only(url: str) -> str:
     return split.path or "/"
 
 
-def _parse_retry_after(header_value: str | None, attempt: int) -> float:
+def _parse_retry_after(
+    header_value: str | None,
+    attempt: int,
+    backoff_schedule: tuple[float, ...],
+) -> float:
     """Return the number of seconds the caller should sleep before retry.
 
     Accepts either ``"<seconds>"`` (integer or float string) or an RFC 7231
@@ -87,9 +85,9 @@ def _parse_retry_after(header_value: str | None, attempt: int) -> float:
             if delta >= 0:
                 return delta
     # Fall through to exponential backoff.
-    if 0 <= attempt < len(_BACKOFF_SCHEDULE):
-        return _BACKOFF_SCHEDULE[attempt]
-    return _BACKOFF_SCHEDULE[-1]
+    if 0 <= attempt < len(backoff_schedule):
+        return backoff_schedule[attempt]
+    return backoff_schedule[-1]
 
 
 class AutomicClient:
@@ -97,6 +95,7 @@ class AutomicClient:
 
     def __init__(self, settings: AutomicSettings) -> None:
         self._base = f"{settings.url}/{settings.client_id}"
+        # Auth: B1 will replace TokenAuth with build_auth (Basic per swagger v21).
         auth = TokenAuth(
             base_url=settings.url,
             user=settings.user,
@@ -109,6 +108,20 @@ class AutomicClient:
             transport=transport,
             timeout=settings.timeout,
             verify=settings.verify_ssl,
+        )
+        # Retry parameters driven by settings so operators can tune without
+        # code changes (see AutomicSettings.retry_*).
+        self._retry_statuses: frozenset[int] = frozenset(settings.retry_statuses)
+        # Build a two-step exponential backoff schedule from settings:
+        # step 0 = base_delay_ms / 1000, step 1 = min(2 * step0, max_backoff).
+        _base_s = settings.retry_base_delay_ms / 1000.0
+        _cap = settings.retry_max_backoff_s
+        self._backoff_schedule: tuple[float, ...] = (
+            min(_base_s, _cap),
+            min(_base_s * 2.0, _cap),
+        )
+        self._update_method: str = (
+            "PUT" if settings.update_method == "PUT" else "POST"
         )
 
     def close(self) -> None:
@@ -136,11 +149,11 @@ class AutomicClient:
         url: str,
         **kwargs: Any,
     ) -> httpx.Response:
-        """Send an HTTP request, retrying on 429 per Retry-After/backoff.
+        """Send an HTTP request, retrying on configured statuses per Retry-After/backoff.
 
-        Non-429 responses are returned unchanged for the caller's
-        ``_raise_for_status`` mapping to handle. Only 429 triggers the
-        retry loop. Emits ``event="http.request"`` on every completed
+        Non-retried responses are returned unchanged for the caller's
+        ``_raise_for_status`` mapping to handle. Retried statuses (default: 429)
+        trigger the retry loop. Emits ``event="http.request"`` on every completed
         attempt — headers are never logged; redaction is handled at the
         processor level.
         """
@@ -157,12 +170,14 @@ class AutomicClient:
                 duration_ms=round(elapsed_ms, 2),
                 attempt=attempt + 1,
             )
-            if response.status_code != 429:
+            if response.status_code not in self._retry_statuses:
                 return response
             if attempt == _MAX_429_ATTEMPTS - 1:
                 return response
             sleep_for = _parse_retry_after(
-                response.headers.get("Retry-After"), attempt,
+                response.headers.get("Retry-After"),
+                attempt,
+                self._backoff_schedule,
             )
             _logger.warning(
                 "http.rate_limited",
@@ -200,8 +215,12 @@ class AutomicClient:
         return cast(dict[str, Any], response.json())
 
     def update_object(self, name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        # update_method is set from settings.update_method at __init__ time:
+        # "POST" for POST_IMPORT, "PUT" for legacy. The actual POST endpoint
+        # with overwrite=true is handled by B2; here we keep the method
+        # configurable for the legacy PUT path.
         response = self._send_with_retry(
-            _UPDATE_METHOD,
+            self._update_method,
             f"{self._base}/objects/{name}",
             json=payload,
         )

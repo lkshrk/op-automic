@@ -33,6 +33,7 @@ def _settings() -> AutomicSettings:
         password="pw",
         verify_ssl=False,
         max_retries=0,
+        update_method="PUT",
     )
 
 
