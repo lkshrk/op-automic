@@ -1,0 +1,38 @@
+{
+  "total": 1,
+  "data": {
+    "jobp": {
+      "metadata": {"version": "21.0.0"},
+      "general_attributes": {
+        "minimum_ae_version": "11.2",
+        "auto_deactivation": "F",
+        "workflow_children": "5",
+        "max_parallel_action": "1",
+        "mrt_time": "000000",
+        "name": "WORKFLOW",
+        "type": "JOBP",
+        "inherit_output_filter": "N",
+        "queue": "CLIENT_QUEUE"
+      },
+      "workflow_attributes": {"reuse_agent_group": "1"},
+      "workflow_definitions": [
+        {"active": "1", "childflags": "0000000000000000", "column": "4", "line_number": "5", "mrt_time": "000000", "object_name": "END", "object_type": "<END>", "predecessors": "2", "row": "2", "precondition_error_action": "H"},
+        {"active": "1", "childflags": "0100000000000000", "column": "3", "line_number": "4", "mrt_time": "000000", "object_name": "ADVANCED_SCRIPT", "object_type": "SCRI", "predecessors": "1", "has_preconditions": "1", "rollback_enabled": "1", "row": "1", "precondition_error_action": "H"},
+        {"active": "1", "childflags": "0000000000000000", "column": "1", "line_number": "1", "mrt_time": "000000", "object_name": "START", "object_type": "<START>", "row": "2", "precondition_error_action": "S"},
+        {"active": "1", "childflags": "0000000000000000", "column": "3", "line_number": "3", "mrt_time": "000000", "object_name": "WINDOWS_JOB", "object_type": "JOBS", "predecessors": "1", "rollback_enabled": "1", "row": "2", "precondition_error_action": "S"},
+        {"active": "1", "childflags": "0000000000000000", "column": "2", "line_number": "2", "mrt_time": "000000", "object_name": "SIMPLE_SCRIPT", "object_type": "SCRI", "predecessors": "1", "rollback_enabled": "1", "row": "2", "precondition_error_action": "H"}
+      ],
+      "line_conditions": [
+        {"workflow_line_number": "2", "line_number": "1", "predecessor_line_number": "1"},
+        {"workflow_line_number": "3", "line_number": "1", "predecessor_line_number": "2"},
+        {"workflow_line_number": "4", "line_number": "1", "predecessor_line_number": "2"},
+        {"workflow_line_number": "5", "line_number": "1", "predecessor_line_number": "4"},
+        {"workflow_line_number": "5", "line_number": "2", "predecessor_line_number": "3"}
+      ],
+      "rollback_definitions": {}
+    }
+  },
+  "path": "EXAMPLES/WORKFLOWS",
+  "client": 100,
+  "hasmore": false
+}

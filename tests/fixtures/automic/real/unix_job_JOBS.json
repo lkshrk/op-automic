@@ -1,0 +1,40 @@
+{
+  "total": 1,
+  "data": {
+    "jobs": {
+      "metadata": {"version": "21.0.0"},
+      "general_attributes": {
+        "minimum_ae_version": "11.2",
+        "auto_deactivation": "A",
+        "platform": "UNIX",
+        "max_parallel_action": "1",
+        "mrt_time": "000000",
+        "name": "UNIX_JOB",
+        "type": "JOBS",
+        "has_object_variables": "1",
+        "inherit_output_filter": "N",
+        "queue": "CLIENT_QUEUE"
+      },
+      "scripts": [
+        {"process": ["sleep 60", "exit"]},
+        {"pre_process": "ls"}
+      ],
+      "job_attributes": {
+        "platform": "UNIX",
+        "agent": "UNIX01",
+        "login": "LOGIN.UNIX01",
+        "job_report_path": "2",
+        "priority": "0",
+        "unix_shell": "bash",
+        "unix_shell_options": "",
+        "unix_type": "",
+        "unix_cmd": ""
+      },
+      "object_variables": {"value": "\"bin/lib\"", "name": "&MY_DIRECTORY#"},
+      "rollback_definitions": {}
+    }
+  },
+  "path": "",
+  "client": 100,
+  "hasmore": false
+}

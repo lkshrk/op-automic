@@ -1,0 +1,29 @@
+{
+  "total": 1,
+  "data": {
+    "vara": {
+      "metadata": {"version": "21.0.0"},
+      "general_attributes": {
+        "minimum_ae_version": "11.2",
+        "name": "STATIC_VARIABLE",
+        "type": "VARA",
+        "sub_type": "STATIC"
+      },
+      "variable_definitions": {
+        "column_count": "5",
+        "on_not_found": "I",
+        "sort_order": "0",
+        "type": "STATIC",
+        "data_type": "C",
+        "validity_range": "FREI"
+      },
+      "static_values": [
+        {"client": "100", "value1": "Asia", "value2": "Africa", "value3": "Europe", "value4": "North America", "value5": "South America", "validity_range": "FREI", "key": "Continents"},
+        {"client": "100", "value1": "Mars", "value2": "Earth", "value3": "Mercury", "value4": "Venus", "value5": "Jupiter", "validity_range": "FREI", "key": "Planets"}
+      ]
+    }
+  },
+  "path": "EXAMPLES/VARAS",
+  "client": 100,
+  "hasmore": false
+}
