@@ -1,0 +1,24 @@
+name: release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    name: release-please
+    runs-on: ubuntu-latest
+    steps:
+      # release-please only cuts a release when the commits since the last
+      # tag contain at least one conventional-commit `feat:` or `fix:` (or
+      # an explicit `!` / `BREAKING CHANGE:` for majors). Commits that lack
+      # a type are ignored. This is the "don't release without a type"
+      # guarantee — see release-please-config.json for the full rule set.
+      - uses: googleapis/release-please-action@v4
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json

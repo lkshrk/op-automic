@@ -1,0 +1,37 @@
+name: pr-title
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  conventional:
+    name: conventional commit prefix
+    runs-on: ubuntu-latest
+    steps:
+      # Enforces a conventional-commit prefix on the PR title so nothing
+      # without a type can be squash-merged to main. release-please
+      # already ignores untyped commits; this is belt-and-braces and
+      # catches the failure at PR review time rather than silently.
+      - uses: amannn/action-semantic-pull-request@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            perf
+            refactor
+            docs
+            test
+            chore
+            ci
+            build
+          requireScope: false
+          subjectPattern: ^[a-z].+$
+          subjectPatternError: |
+            PR title subject must start with a lowercase letter, e.g.
+            `feat(cli): add --quiet flag`.
