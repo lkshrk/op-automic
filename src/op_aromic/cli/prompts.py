@@ -82,17 +82,41 @@ def print_apply_result(
 def summarise_destroy(result: DestroyResult, console: Console | None = None) -> None:
     """Render counts for a DestroyResult."""
     out = console or Console()
+    verb = "Would destroy" if result.dry_run else "Destroyed"
     out.print(
-        f"[bold]Destroyed:[/] {len(result.successes)} deleted, "
+        f"[bold]{verb}:[/] {len(result.successes)} deleted, "
         f"{len(result.failures)} failed, "
         f"{len(result.refused)} refused, "
         f"{len(result.not_supported)} not supported (remove manually)",
     )
 
 
+def preview_destroy(
+    result: DestroyResult, console: Console | None = None,
+) -> None:
+    """Print the ordered list of objects a dry-run destroy would delete.
+
+    Only meaningful for ``result.dry_run=True``. Operators run
+    ``destroy --dry-run`` to see exactly what would be removed and in what
+    reverse-dependency order before committing to a real destroy.
+    """
+    out = console or Console()
+    if not result.dry_run:
+        return
+    if result.successes:
+        out.print("[bold]Would delete (reverse-dependency order):[/]")
+        for i, s in enumerate(result.successes, start=1):
+            out.print(f"  {i}. {s.kind}/{s.name}")
+    if result.refused:
+        out.print(f"[yellow]Would refuse ({len(result.refused)}):[/]")
+        for r in result.refused:
+            out.print(f"  - {r.kind}/{r.name} — {r.reason}")
+
+
 __all__ = [
     "confirm_apply",
     "confirm_destroy",
+    "preview_destroy",
     "print_apply_result",
     "summarise_destroy",
 ]

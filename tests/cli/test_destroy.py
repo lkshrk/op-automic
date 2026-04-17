@@ -180,6 +180,10 @@ def test_destroy_dry_run_makes_no_calls(env: None, tmp_path: Path) -> None:
         )
     assert not delete_route.called
     assert result.exit_code == 0
+    # Dry-run preview lists what would be deleted and uses "Would destroy" verb.
+    assert "Would delete (reverse-dependency order)" in result.stdout
+    assert "Job/X" in result.stdout
+    assert "Would destroy:" in result.stdout
 
 
 def test_destroy_prompt_rejects_non_yes(env: None, tmp_path: Path) -> None:

@@ -11,7 +11,12 @@ from rich.console import Console
 
 from op_aromic import __version__
 from op_aromic.cli.output import envelope, plan_to_json_dict, render_plan
-from op_aromic.cli.prompts import confirm_apply, confirm_destroy, summarise_destroy
+from op_aromic.cli.prompts import (
+    confirm_apply,
+    confirm_destroy,
+    preview_destroy,
+    summarise_destroy,
+)
 from op_aromic.client.api import AutomicAPI
 from op_aromic.client.errors import AutomicError
 from op_aromic.client.http import AutomicClient
@@ -962,6 +967,8 @@ def destroy(
         )
         raise typer.Exit(code=0 if result.status == "success" else 2)
 
+    if result.dry_run:
+        preview_destroy(result, console=_console)
     summarise_destroy(result, console=_console)
     for failure in result.failures:
         _error_console.print(
