@@ -10,7 +10,7 @@ import typer
 from rich.console import Console
 
 from op_aromic import __version__
-from op_aromic.cli.output import plan_to_json_dict, render_plan
+from op_aromic.cli.output import envelope, plan_to_json_dict, render_plan
 from op_aromic.cli.prompts import confirm_apply, confirm_destroy, summarise_destroy
 from op_aromic.client.api import AutomicAPI
 from op_aromic.client.errors import AutomicError
@@ -132,6 +132,28 @@ def _callback(
     ctx.obj["log_format"] = fmt
 
 
+def _output_mode(ctx: typer.Context) -> str:
+    """Return 'human' or 'json' from the global callback context.
+
+    Defaults to 'human' when the callback did not run (e.g. a command
+    invoked directly from Python tests bypassing the root app).
+    """
+    if ctx.obj and isinstance(ctx.obj, dict):
+        mode = ctx.obj.get("output", "human")
+        if isinstance(mode, str):
+            return mode
+    return "human"
+
+
+def _emit_json(doc: dict[str, object]) -> None:
+    """Print the canonical JSON envelope on stdout as a single line.
+
+    Stdout is the one machine-readable channel; logs go to stderr. Tests
+    parse this by splitting on the last ``\\n``.
+    """
+    typer.echo(json.dumps(doc))
+
+
 def _format_issue(prefix: str, issue: Issue) -> str:
     location = f"{issue.source_path}"
     if issue.doc_index:
@@ -152,6 +174,7 @@ def _print_issues(issues: list[Issue], severity: Severity) -> None:
 
 @app.command()
 def validate(
+    ctx: typer.Context,
     path: str = typer.Argument(".", help="Path to YAML manifests."),
     strict: bool = typer.Option(False, "--strict", help="Fail on warnings."),
 ) -> None:
@@ -162,14 +185,60 @@ def validate(
       1 — one or more errors (parse, schema, or cross-doc rules)
       2 — warnings present and --strict is set
     """
+    output_mode = _output_mode(ctx)
     target = Path(path)
     try:
         loaded = load_manifests(target)
     except EngineError as exc:
-        _error_console.print(f"[bold red]ERROR[/] {exc}")
+        if output_mode == "json":
+            _emit_json(
+                envelope(
+                    command="validate",
+                    status="errors",
+                    summary={"errors": 1, "warnings": 0, "manifests": 0},
+                    details={"error": str(exc)},
+                ),
+            )
+        else:
+            _error_console.print(f"[bold red]ERROR[/] {exc}")
         raise typer.Exit(code=1) from exc
 
     report = validate_manifests(loaded)
+
+    if output_mode == "json":
+        if report.errors:
+            status = "errors"
+            code = 1
+        elif report.warnings and strict:
+            status = "warnings"
+            code = 2
+        else:
+            status = "ok"
+            code = 0
+        _emit_json(
+            envelope(
+                command="validate",
+                status=status,
+                summary={
+                    "errors": len(report.errors),
+                    "warnings": len(report.warnings),
+                    "manifests": len(loaded),
+                },
+                details={
+                    "errors": [
+                        {"path": str(i.source_path), "message": i.message}
+                        for i in report.errors
+                    ],
+                    "warnings": [
+                        {"path": str(i.source_path), "message": i.message}
+                        for i in report.warnings
+                    ],
+                },
+            ),
+        )
+        if code:
+            raise typer.Exit(code=code)
+        return
 
     _print_issues(report.errors, Severity.ERROR)
     _print_issues(report.warnings, Severity.WARNING)
@@ -224,6 +293,7 @@ def _load_and_validate(target_path: Path) -> list:  # type: ignore[type-arg]
 
 @app.command()
 def plan(
+    ctx: typer.Context,
     path: str = typer.Argument(".", help="Path to YAML manifests."),
     target: str | None = typer.Option(
         None, "--target", "-t", help="Plan for a single metadata.name only.",
@@ -251,6 +321,7 @@ def plan(
       1 — error (bad manifests, auth failure, transport failure)
       2 — one or more changes pending
     """
+    output_mode = _output_mode(ctx)
     target_path = Path(path)
     loaded = _load_and_validate(target_path)
 
@@ -268,14 +339,42 @@ def plan(
                 target=target,
             )
     except AutomicError as exc:
-        _error_console.print(f"[bold red]API error:[/] {exc}")
+        if output_mode == "json":
+            _emit_json(
+                envelope(
+                    command="plan",
+                    status="errors",
+                    summary={"error": str(exc)},
+                    details={},
+                ),
+            )
+        else:
+            _error_console.print(f"[bold red]API error:[/] {exc}")
         raise typer.Exit(code=1) from exc
-
-    render_plan(the_plan, render_console)
 
     if out is not None:
         Path(out).write_text(json.dumps(plan_to_json_dict(the_plan), indent=2))
 
+    if output_mode == "json":
+        _emit_json(
+            envelope(
+                command="plan",
+                status="changes" if the_plan.has_changes else "ok",
+                summary={
+                    "creates": len(the_plan.creates),
+                    "updates": len(the_plan.updates),
+                    "deletes": len(the_plan.deletes),
+                    "noops": len(the_plan.noops),
+                    "total_changes": the_plan.total_changes,
+                },
+                details=plan_to_json_dict(the_plan),
+            ),
+        )
+        if the_plan.has_changes:
+            raise typer.Exit(code=2)
+        return
+
+    render_plan(the_plan, render_console)
     if the_plan.has_changes:
         raise typer.Exit(code=2)
 
@@ -319,6 +418,7 @@ def _exit_code_for_apply(result: ApplyResult) -> int:
 
 @app.command()
 def apply(
+    ctx: typer.Context,
     path: str = typer.Argument(".", help="Path to YAML manifests."),
     auto_approve: bool = typer.Option(
         False, "--auto-approve", help="Skip the yes/no confirmation prompt.",
@@ -348,14 +448,37 @@ def apply(
       1 — fatal error (bad manifests, auth, etc.)
       2 — partial success (some items failed or were skipped)
     """
+    output_mode = _output_mode(ctx)
     target_path = Path(path)
     loaded = _load_and_validate(target_path)
 
     try:
         graph = build_graph(loaded)
     except CyclicDependencyError as exc:
-        _error_console.print(f"[bold red]cycle:[/] {exc}")
+        if output_mode == "json":
+            _emit_json(
+                envelope(
+                    command="apply",
+                    status="errors",
+                    summary={"error": f"cycle: {exc}"},
+                ),
+            )
+        else:
+            _error_console.print(f"[bold red]cycle:[/] {exc}")
         raise typer.Exit(code=1) from exc
+
+    # Refuse interactive confirmation in JSON mode before any network
+    # round-trip — an interactive prompt would corrupt the single-document
+    # stdout contract and callers also want to fail fast, not after a plan.
+    if not auto_approve and output_mode == "json":
+        _emit_json(
+            envelope(
+                command="apply",
+                status="aborted",
+                summary={"reason": "--auto-approve required in JSON mode"},
+            ),
+        )
+        raise typer.Exit(code=1)
 
     settings = AutomicSettings()
     try:
@@ -368,9 +491,6 @@ def apply(
                 the_plan = build_plan(loaded, api, prune=prune, target=target)
 
             if not auto_approve:
-                # Prompt before any writes. `input()` raises EOFError if
-                # stdin is empty (e.g. Typer CliRunner with no input) —
-                # treat that as a "no".
                 try:
                     approved = confirm_apply(the_plan, console=_console)
                 except EOFError:
@@ -393,8 +513,45 @@ def apply(
                 plan_markers=markers,
             )
     except AutomicError as exc:
-        _error_console.print(f"[bold red]API error:[/] {exc}")
+        if output_mode == "json":
+            _emit_json(
+                envelope(
+                    command="apply",
+                    status="errors",
+                    summary={"error": str(exc)},
+                ),
+            )
+        else:
+            _error_console.print(f"[bold red]API error:[/] {exc}")
         raise typer.Exit(code=1) from exc
+
+    if output_mode == "json":
+        _emit_json(
+            envelope(
+                command="apply",
+                status="ok" if result.status == "success" else "partial",
+                summary={
+                    "successes": len(result.successes),
+                    "failures": len(result.failures),
+                    "skipped": len(result.skipped),
+                },
+                details={
+                    "failures": [
+                        {
+                            "kind": f.kind,
+                            "name": f.name,
+                            "reason": f.reason,
+                        }
+                        for f in result.failures
+                    ],
+                    "skipped": [
+                        {"kind": s.kind, "name": s.name, "action": s.action}
+                        for s in result.skipped
+                    ],
+                },
+            ),
+        )
+        raise typer.Exit(code=_exit_code_for_apply(result))
 
     _console.print(
         f"[bold]Applied:[/] {len(result.successes)} ok, "
@@ -442,6 +599,7 @@ _OPT_DRY_RUN = typer.Option(
 
 @app.command(name="export")
 def export_cmd(
+    ctx: typer.Context,
     output_dir: str = _OPT_OUTPUT_DIR,
     filters: list[str] | None = _OPT_FILTER,
     folders: list[str] | None = _OPT_FOLDER,
@@ -455,20 +613,43 @@ def export_cmd(
       0 — success (including --dry-run)
       1 — error (bad flag, auth failure, transport failure)
     """
+    output_mode = _output_mode(ctx)
     if layout not in _VALID_LAYOUTS:
-        _error_console.print(
-            f"[bold red]ERROR[/] --layout must be one of "
-            f"{', '.join(_VALID_LAYOUTS)}; got {layout!r}",
-        )
+        if output_mode == "json":
+            _emit_json(
+                envelope(
+                    command="export",
+                    status="errors",
+                    summary={"error": f"invalid layout: {layout!r}"},
+                ),
+            )
+        else:
+            _error_console.print(
+                f"[bold red]ERROR[/] --layout must be one of "
+                f"{', '.join(_VALID_LAYOUTS)}; got {layout!r}",
+            )
         raise typer.Exit(code=1)
 
     out_path = Path(output_dir)
 
     if dry_run:
-        # Zero HTTP calls: just echo the planned configuration. The real
-        # listing happens only when we actually connect, because doing a
-        # partial listing and then discarding it would defeat the purpose
-        # of a dry-run when credentials are missing / auth is expensive.
+        if output_mode == "json":
+            _emit_json(
+                envelope(
+                    command="export",
+                    status="ok",
+                    summary={
+                        "dry_run": True,
+                        "output_dir": str(out_path),
+                        "layout": layout,
+                        "kinds": filters or [],
+                        "folders": folders or [],
+                        "overwrite": overwrite,
+                    },
+                ),
+            )
+            return
+        # Zero HTTP calls: just echo the planned configuration.
         _console.print(
             f"[bold]dry-run:[/] would export to {out_path} "
             f"(layout={layout}, kinds={filters or 'all'}, "
@@ -489,11 +670,51 @@ def export_cmd(
                 overwrite=overwrite,
             )
     except AutomicError as exc:
-        _error_console.print(f"[bold red]API error:[/] {exc}")
+        if output_mode == "json":
+            _emit_json(
+                envelope(
+                    command="export",
+                    status="errors",
+                    summary={"error": str(exc)},
+                ),
+            )
+        else:
+            _error_console.print(f"[bold red]API error:[/] {exc}")
         raise typer.Exit(code=1) from exc
     except ValueError as exc:
-        _error_console.print(f"[bold red]ERROR[/] {exc}")
+        if output_mode == "json":
+            _emit_json(
+                envelope(
+                    command="export",
+                    status="errors",
+                    summary={"error": str(exc)},
+                ),
+            )
+        else:
+            _error_console.print(f"[bold red]ERROR[/] {exc}")
         raise typer.Exit(code=1) from exc
+
+    if output_mode == "json":
+        _emit_json(
+            envelope(
+                command="export",
+                status="ok",
+                summary={
+                    "objects_exported": result.objects_exported,
+                    "files_written": len(result.files_written),
+                    "skipped": len(result.skipped),
+                    "output_dir": str(out_path),
+                },
+                details={
+                    "files_written": [str(p) for p in result.files_written],
+                    "skipped": [
+                        {"kind": k, "name": n, "reason": r}
+                        for k, n, r in result.skipped
+                    ],
+                },
+            ),
+        )
+        return
 
     _console.print(
         f"[bold green]Exported[/] {result.objects_exported} object(s) to "
@@ -511,6 +732,7 @@ _ = Layout
 
 @app.command()
 def destroy(
+    ctx: typer.Context,
     path: str = typer.Argument(".", help="Path to YAML manifests."),
     confirm: bool = typer.Option(
         False, "--confirm", help="Required to actually destroy.",
@@ -534,8 +756,18 @@ def destroy(
       1 — fatal error or prompt aborted
       2 — partial (some failures or refused objects)
     """
+    output_mode = _output_mode(ctx)
     if not confirm:
-        typer.echo("Error: --confirm flag is required for destroy.", err=True)
+        if output_mode == "json":
+            _emit_json(
+                envelope(
+                    command="destroy",
+                    status="errors",
+                    summary={"error": "--confirm flag is required for destroy"},
+                ),
+            )
+        else:
+            typer.echo("Error: --confirm flag is required for destroy.", err=True)
         raise typer.Exit(code=1)
 
     target_path = Path(path)
@@ -544,10 +776,30 @@ def destroy(
     try:
         graph = build_graph(loaded)
     except CyclicDependencyError as exc:
-        _error_console.print(f"[bold red]cycle:[/] {exc}")
+        if output_mode == "json":
+            _emit_json(
+                envelope(
+                    command="destroy",
+                    status="errors",
+                    summary={"error": f"cycle: {exc}"},
+                ),
+            )
+        else:
+            _error_console.print(f"[bold red]cycle:[/] {exc}")
         raise typer.Exit(code=1) from exc
 
     if not auto_approve:
+        # JSON mode refuses interactive prompts to preserve the single-
+        # document stdout contract; callers must pass --auto-approve.
+        if output_mode == "json":
+            _emit_json(
+                envelope(
+                    command="destroy",
+                    status="aborted",
+                    summary={"reason": "--auto-approve required in JSON mode"},
+                ),
+            )
+            raise typer.Exit(code=1)
         try:
             approved = confirm_destroy(loaded, console=_console)
         except EOFError:
@@ -567,8 +819,41 @@ def destroy(
                 dry_run=dry_run,
             )
     except AutomicError as exc:
-        _error_console.print(f"[bold red]API error:[/] {exc}")
+        if output_mode == "json":
+            _emit_json(
+                envelope(
+                    command="destroy",
+                    status="errors",
+                    summary={"error": str(exc)},
+                ),
+            )
+        else:
+            _error_console.print(f"[bold red]API error:[/] {exc}")
         raise typer.Exit(code=1) from exc
+
+    if output_mode == "json":
+        _emit_json(
+            envelope(
+                command="destroy",
+                status="ok" if result.status == "success" else "partial",
+                summary={
+                    "successes": len(result.successes),
+                    "failures": len(result.failures),
+                    "refused": len(result.refused),
+                },
+                details={
+                    "failures": [
+                        {"kind": f.kind, "name": f.name, "reason": f.reason}
+                        for f in result.failures
+                    ],
+                    "refused": [
+                        {"kind": r.kind, "name": r.name, "reason": r.reason}
+                        for r in result.refused
+                    ],
+                },
+            ),
+        )
+        raise typer.Exit(code=0 if result.status == "success" else 2)
 
     summarise_destroy(result, console=_console)
     for failure in result.failures:

@@ -94,6 +94,30 @@ def plan_to_json_dict(plan: Plan) -> dict[str, Any]:
     }
 
 
+def envelope(
+    *,
+    command: str,
+    status: str,
+    summary: dict[str, Any],
+    details: dict[str, Any] | list[Any] | None = None,
+) -> dict[str, Any]:
+    """Build the canonical --output json envelope.
+
+    Shape: ``{"command": ..., "status": ..., "summary": {...}, "details": {...}}``.
+    ``status`` is one of ``"ok"``, ``"changes"``, ``"errors"``, ``"partial"``,
+    ``"aborted"``. Callers wire these to their own exit code conventions.
+
+    Kept here (and not in the app module) so tests can import and reuse
+    the envelope shape without dragging in Typer.
+    """
+    return {
+        "command": command,
+        "status": status,
+        "summary": summary,
+        "details": details if details is not None else {},
+    }
+
+
 def _diff_to_dict(diff: ObjectDiff) -> dict[str, Any]:
     return {
         "action": diff.action,
@@ -114,4 +138,4 @@ def _diff_to_dict(diff: ObjectDiff) -> dict[str, Any]:
     }
 
 
-__all__ = ["plan_to_json_dict", "render_plan"]
+__all__ = ["envelope", "plan_to_json_dict", "render_plan"]
