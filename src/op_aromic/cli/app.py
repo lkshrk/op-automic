@@ -80,7 +80,7 @@ def _callback(
         None,
         "--config",
         "-c",
-        help="Path to config file.",
+        help="Path to config file (sets AROMIC_CONFIG_FILE).",
     ),
     log_level: str = typer.Option(
         "info",
@@ -100,6 +100,44 @@ def _callback(
         help=f"Output format for command results. One of: {', '.join(_VALID_OUTPUTS)}.",
         case_sensitive=False,
     ),
+    # ---- Automic connection overrides ------------------------------------
+    automic_url: str | None = typer.Option(
+        None, "--automic-url", help="Override Automic API base URL.", envvar=None,
+    ),
+    automic_client: int | None = typer.Option(
+        None, "--automic-client", help="Override Automic client number.", envvar=None,
+    ),
+    automic_user: str | None = typer.Option(
+        None, "--automic-user", help="Override Automic username.", envvar=None,
+    ),
+    automic_department: str | None = typer.Option(
+        None, "--automic-department", help="Override Automic department.", envvar=None,
+    ),
+    automic_password: str | None = typer.Option(
+        None,
+        "--automic-password",
+        help="Override Automic password (not echoed).",
+        envvar=None,
+        hide_input=True,
+    ),
+    # ---- Behaviour overrides --------------------------------------------
+    auto_create_folders: bool | None = typer.Option(
+        None,
+        "--auto-create-folders/--no-auto-create-folders",
+        help="Override auto_create_folders setting.",
+    ),
+    retry_base_delay_ms: int | None = typer.Option(
+        None, "--retry-base-delay-ms", help="Override retry base delay (ms).",
+    ),
+    retry_max_backoff_s: float | None = typer.Option(
+        None, "--retry-max-backoff-s", help="Override retry max backoff (seconds).",
+    ),
+    update_method: str | None = typer.Option(
+        None, "--update-method", help="Override update method: POST_IMPORT or PUT.",
+    ),
+    auth_method: str | None = typer.Option(
+        None, "--auth-method", help="Override auth method: basic or bearer.",
+    ),
 ) -> None:
     """GitOps CLI for Broadcom Automic Workload Automation."""
     if log_level.lower() not in _VALID_LOG_LEVELS:
@@ -115,6 +153,13 @@ def _callback(
             f"--output must be one of {', '.join(_VALID_OUTPUTS)}; got {output!r}",
         )
 
+    # Store --config path in ctx.obj; _settings_from_ctx will apply it
+    # temporarily when constructing AutomicSettings so the process env is
+    # not permanently mutated across sub-commands or tests.
+    if config is not None:
+        ctx.ensure_object(dict)
+        ctx.obj["config_file"] = config
+
     # ``verbose`` is legacy; it bumps effective log level when enabled, but
     # --log-level wins if explicitly set to a non-default.
     effective_level = "debug" if verbose and log_level == "info" else log_level
@@ -123,13 +168,37 @@ def _callback(
     )
     configure_logging(level=effective_level, format=fmt)
 
+    # Collect CLI-level setting overrides into a dict passed to sub-commands
+    # via ctx.obj so they can construct AutomicSettings(**overrides).
+    from typing import Any as _Any
+    settings_overrides: dict[str, _Any] = {}
+    if automic_url is not None:
+        settings_overrides["url"] = automic_url
+    if automic_client is not None:
+        settings_overrides["client_id"] = automic_client
+    if automic_user is not None:
+        settings_overrides["user"] = automic_user
+    if automic_department is not None:
+        settings_overrides["department"] = automic_department
+    if automic_password is not None:
+        settings_overrides["password"] = automic_password
+    if auto_create_folders is not None:
+        settings_overrides["auto_create_folders"] = auto_create_folders
+    if retry_base_delay_ms is not None:
+        settings_overrides["retry_base_delay_ms"] = retry_base_delay_ms
+    if retry_max_backoff_s is not None:
+        settings_overrides["retry_max_backoff_s"] = retry_max_backoff_s
+    if update_method is not None:
+        settings_overrides["update_method"] = update_method
+    if auth_method is not None:
+        settings_overrides["auth_method"] = auth_method
+
     # Expose the output mode to sub-commands via Typer's context object.
-    # Using a plain dict keeps the shape Typer-friendly and obvious at the
-    # call site; a dataclass would be premature.
     ctx.ensure_object(dict)
     ctx.obj["output"] = output.lower()
     ctx.obj["log_level"] = effective_level
     ctx.obj["log_format"] = fmt
+    ctx.obj["settings_overrides"] = settings_overrides
 
 
 def _output_mode(ctx: typer.Context) -> str:
@@ -263,6 +332,39 @@ def validate(
     )
 
 
+def _settings_from_ctx(ctx: typer.Context) -> AutomicSettings:
+    """Build AutomicSettings, applying any CLI overrides from ctx.obj.
+
+    If ``--config`` was supplied, AROMIC_CONFIG_FILE is temporarily set so
+    _YamlSource picks it up, then restored after construction.
+    """
+    import os as _os
+    from typing import Any
+
+    overrides: dict[str, Any] = {}
+    config_file: str | None = None
+    if ctx.obj and isinstance(ctx.obj, dict):
+        raw = ctx.obj.get("settings_overrides")
+        if isinstance(raw, dict):
+            overrides = raw
+        raw_config = ctx.obj.get("config_file")
+        if isinstance(raw_config, str):
+            config_file = raw_config
+
+    if config_file is not None:
+        prev = _os.environ.get("AROMIC_CONFIG_FILE")
+        _os.environ["AROMIC_CONFIG_FILE"] = config_file
+        try:
+            return AutomicSettings(**overrides)
+        finally:
+            if prev is None:
+                _os.environ.pop("AROMIC_CONFIG_FILE", None)
+            else:
+                _os.environ["AROMIC_CONFIG_FILE"] = prev
+
+    return AutomicSettings(**overrides)
+
+
 def _build_api_client(settings: AutomicSettings) -> AutomicClient:
     # Extracted so tests can monkeypatch settings construction.
     return AutomicClient(settings)
@@ -325,7 +427,7 @@ def plan(
     target_path = Path(path)
     loaded = _load_and_validate(target_path)
 
-    settings = AutomicSettings()
+    settings = _settings_from_ctx(ctx)
     render_console = Console(no_color=no_color, force_terminal=not no_color)
 
     try:
@@ -480,7 +582,7 @@ def apply(
         )
         raise typer.Exit(code=1)
 
-    settings = AutomicSettings()
+    settings = _settings_from_ctx(ctx)
     try:
         with _build_api_client(settings) as client:
             api = AutomicAPI(client)
@@ -657,7 +759,7 @@ def export_cmd(
         )
         return
 
-    settings = AutomicSettings()
+    settings = _settings_from_ctx(ctx)
     try:
         with _build_api_client(settings) as client:
             api = AutomicAPI(client)
@@ -808,7 +910,7 @@ def destroy(
             _console.print("[yellow]aborted[/]: destroy cancelled by user.")
             raise typer.Exit(code=1)
 
-    settings = AutomicSettings()
+    settings = _settings_from_ctx(ctx)
     try:
         with _build_api_client(settings) as client:
             result = destroy_objects(
@@ -890,7 +992,7 @@ def auth_check(
       1 — authentication or transport failure
     """
     output_mode = _output_mode(ctx)
-    settings = AutomicSettings()
+    settings = _settings_from_ctx(ctx)
     try:
         with _build_api_client(settings) as client:
             # Consuming one iteration of list_objects forces the auth
