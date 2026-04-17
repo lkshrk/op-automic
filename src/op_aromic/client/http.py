@@ -204,25 +204,48 @@ class AutomicClient:
         except NotFoundError:
             return None
 
-    def create_object(self, payload: dict[str, Any]) -> dict[str, Any]:
-        response = self._send_with_retry(
-            "POST", f"{self._base}/objects", json=payload,
-        )
+    def _import_object(
+        self,
+        payload: dict[str, Any],
+        *,
+        overwrite: bool,
+    ) -> dict[str, Any]:
+        """POST to ``/{client_id}/objects?overwrite_existing_objects=<overwrite>``.
+
+        This is the canonical write path per Automic AE REST API swagger v21.
+        Both ``create_object`` and ``update_object`` route through here when
+        ``settings.update_method == "POST_IMPORT"`` (the default).
+
+        ``overwrite=False`` → fail if the object already exists (``ConflictError``).
+        ``overwrite=True``  → upsert: create or replace without raising on conflict.
+        """
+        url = f"{self._base}/objects"
+        params = {"overwrite_existing_objects": str(overwrite).lower()}
+        response = self._send_with_retry("POST", url, json=payload, params=params)
         self._raise_for_status(response)
         return cast(dict[str, Any], response.json())
 
+    def create_object(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if self._update_method == "PUT":
+            # Legacy PUT path: POST without overwrite param for creation.
+            response = self._send_with_retry(
+                "POST", f"{self._base}/objects", json=payload,
+            )
+            self._raise_for_status(response)
+            return cast(dict[str, Any], response.json())
+        # POST_IMPORT canonical path: overwrite=false → ConflictError if exists.
+        return self._import_object(payload, overwrite=False)
+
     def update_object(self, name: str, payload: dict[str, Any]) -> dict[str, Any]:
-        # update_method is set from settings.update_method at __init__ time:
-        # "POST" for POST_IMPORT, "PUT" for legacy. The actual POST endpoint
-        # with overwrite=true is handled by B2; here we keep the method
-        # configurable for the legacy PUT path.
-        response = self._send_with_retry(
-            self._update_method,
-            f"{self._base}/objects/{name}",
-            json=payload,
-        )
-        self._raise_for_status(response)
-        return cast(dict[str, Any], response.json())
+        if self._update_method == "PUT":
+            # Legacy PUT path for operators with non-standard instances.
+            response = self._send_with_retry(
+                "PUT", f"{self._base}/objects/{name}", json=payload,
+            )
+            self._raise_for_status(response)
+            return cast(dict[str, Any], response.json())
+        # POST_IMPORT canonical path per swagger v21: upsert via overwrite=true.
+        return self._import_object(payload, overwrite=True)
 
     def delete_object(self, name: str) -> None:
         response = self._send_with_retry(

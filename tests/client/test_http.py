@@ -390,6 +390,65 @@ def test_retry_custom_statuses(monkeypatch: pytest.MonkeyPatch) -> None:
     assert len(sleeps) == 1  # retried once
 
 
+def test_create_object_post_import_sends_overwrite_false() -> None:
+    # POST_IMPORT mode (default): create → POST /objects?overwrite_existing_objects=false
+    settings = _make_settings()
+    base = f"{settings.url}/{settings.client_id}"
+    with respx.mock(assert_all_called=False) as mock:
+        _mock_auth(mock, settings)
+        route = mock.post(f"{base}/objects").mock(
+            return_value=httpx.Response(200, json={"Name": "NEW"}),
+        )
+        with AutomicClient(settings) as client:
+            result = client.create_object({"Name": "NEW"})
+        assert route.called
+        sent_request = route.calls.last.request
+        assert "overwrite_existing_objects=false" in str(sent_request.url)
+    assert result == {"Name": "NEW"}
+
+
+def test_update_object_post_import_sends_overwrite_true() -> None:
+    # POST_IMPORT mode (default): update → POST /objects?overwrite_existing_objects=true
+    settings = _make_settings()
+    base = f"{settings.url}/{settings.client_id}"
+    with respx.mock(assert_all_called=False) as mock:
+        _mock_auth(mock, settings)
+        route = mock.post(f"{base}/objects").mock(
+            return_value=httpx.Response(200, json={"Name": "UPD"}),
+        )
+        with AutomicClient(settings) as client:
+            result = client.update_object("UPD", {"Name": "UPD"})
+        assert route.called
+        sent_request = route.calls.last.request
+        assert "overwrite_existing_objects=true" in str(sent_request.url)
+    assert result == {"Name": "UPD"}
+
+
+def test_create_object_put_mode_posts_without_param() -> None:
+    # Legacy PUT mode: create → POST /objects (no overwrite param)
+    settings = AutomicSettings(
+        url="http://example.test/ae/api/v1",
+        client_id=100,
+        user="USER",
+        department="DEPT",
+        password="pw",
+        verify_ssl=False,
+        max_retries=0,
+        update_method="PUT",
+    )
+    base = f"{settings.url}/{settings.client_id}"
+    with respx.mock(assert_all_called=False) as mock:
+        _mock_auth(mock, settings)
+        route = mock.post(f"{base}/objects").mock(
+            return_value=httpx.Response(200, json={"Name": "NEW"}),
+        )
+        with AutomicClient(settings) as client:
+            client.create_object({"Name": "NEW"})
+        assert route.called
+        sent_request = route.calls.last.request
+        assert "overwrite_existing_objects" not in str(sent_request.url)
+
+
 def test_list_objects_paginates() -> None:
     settings = _make_settings()
     base = f"{settings.url}/{settings.client_id}"

@@ -18,13 +18,14 @@ Scratchpad populated during autonomous implementation. Each entry:
 - **Default chosen**: keep current code; add `aromic auth check` debug subcommand in Phase 5.
 - **Resolution needed**: verify against live Automic AWA REST endpoint.
 
-### PATCH vs PUT for updates
-- **Phase**: 2/3
-- **Severity**: high
+### PATCH vs PUT for updates — resolved: POST /objects?overwrite_existing_objects=true
+- **Phase**: 2/3/6
+- **Severity**: resolved
 - **Context**: `update_object` uses PATCH. Automic typically requires full-body PUT.
 - **Default chosen**: assume PUT with full merged payload; switch in Phase 3 applier.
-- **Resolution needed**: live verification.
-- **2026-04-17 (Phase 2, commit 996349e)**: Flipped `update_object` to use `_UPDATE_METHOD = "PUT"` in `src/op_aromic/client/http.py`. Constant is module-level so a future flip back to PATCH is a one-liner.
+- **2026-04-17 (Phase 2, commit 996349e)**: Flipped `update_object` to use `_UPDATE_METHOD = "PUT"`.
+- **2026-04-17 (Phase 6, B2)**: Replaced both PUT and legacy-POST paths with `POST /{client_id}/objects?overwrite_existing_objects=<true|false>` per swagger v21. `create_object` uses `overwrite=false`; `update_object` uses `overwrite=true`. Legacy `update_method=PUT` setting still falls through to the old PUT path for non-standard instances. `_import_object` is the canonical shared helper.
+- **Resolution**: Implemented. Live verification of `overwrite_existing_objects` param semantics still needed.
 
 ### Automic JSON field shape
 - **Phase**: 2
