@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Literal
 
 import typer
 from rich.console import Console
@@ -31,6 +32,7 @@ from op_aromic.engine.exporter import export as export_manifests
 from op_aromic.engine.loader import load_manifests
 from op_aromic.engine.planner import Plan, build_plan, build_plan_parallel
 from op_aromic.engine.validator import Issue, Severity, validate_manifests
+from op_aromic.observability.logging import configure_logging
 
 app = typer.Typer(
     name="aromic",
@@ -44,6 +46,18 @@ _console = Console()
 _error_console = Console(stderr=True)
 
 
+# Output-mode sentinel for the global callback. Commands read it off the
+# Typer ctx.obj when emitting JSON or human output. Kept as a module-level
+# dict-with-string so the callback → command handoff has a single shape.
+_OutputMode = str  # "human" | "json"
+
+_VALID_LOG_LEVELS: tuple[str, ...] = (
+    "debug", "info", "warning", "warn", "error", "critical",
+)
+_VALID_LOG_FORMATS: tuple[str, ...] = ("text", "json")
+_VALID_OUTPUTS: tuple[str, ...] = ("human", "json")
+
+
 def version_callback(value: bool) -> None:
     if value:
         typer.echo(f"aromic {__version__}")
@@ -52,6 +66,7 @@ def version_callback(value: bool) -> None:
 
 @app.callback()
 def _callback(
+    ctx: typer.Context,
     version: bool | None = typer.Option(
         None,
         "--version",
@@ -67,8 +82,54 @@ def _callback(
         "-c",
         help="Path to config file.",
     ),
+    log_level: str = typer.Option(
+        "info",
+        "--log-level",
+        help=f"Logging level. One of: {', '.join(_VALID_LOG_LEVELS)}.",
+        case_sensitive=False,
+    ),
+    log_format: str = typer.Option(
+        "text",
+        "--log-format",
+        help=f"Logging format. One of: {', '.join(_VALID_LOG_FORMATS)}.",
+        case_sensitive=False,
+    ),
+    output: str = typer.Option(
+        "human",
+        "--output",
+        help=f"Output format for command results. One of: {', '.join(_VALID_OUTPUTS)}.",
+        case_sensitive=False,
+    ),
 ) -> None:
     """GitOps CLI for Broadcom Automic Workload Automation."""
+    if log_level.lower() not in _VALID_LOG_LEVELS:
+        raise typer.BadParameter(
+            f"--log-level must be one of {', '.join(_VALID_LOG_LEVELS)}; got {log_level!r}",
+        )
+    if log_format.lower() not in _VALID_LOG_FORMATS:
+        raise typer.BadParameter(
+            f"--log-format must be one of {', '.join(_VALID_LOG_FORMATS)}; got {log_format!r}",
+        )
+    if output.lower() not in _VALID_OUTPUTS:
+        raise typer.BadParameter(
+            f"--output must be one of {', '.join(_VALID_OUTPUTS)}; got {output!r}",
+        )
+
+    # ``verbose`` is legacy; it bumps effective log level when enabled, but
+    # --log-level wins if explicitly set to a non-default.
+    effective_level = "debug" if verbose and log_level == "info" else log_level
+    fmt: Literal["text", "json"] = (
+        "json" if log_format.lower() == "json" else "text"
+    )
+    configure_logging(level=effective_level, format=fmt)
+
+    # Expose the output mode to sub-commands via Typer's context object.
+    # Using a plain dict keeps the shape Typer-friendly and obvious at the
+    # call site; a dataclass would be premature.
+    ctx.ensure_object(dict)
+    ctx.obj["output"] = output.lower()
+    ctx.obj["log_level"] = effective_level
+    ctx.obj["log_format"] = fmt
 
 
 def _format_issue(prefix: str, issue: Issue) -> str:
