@@ -1,24 +1,56 @@
-name: release
+name: Release
 
 on:
-  push:
-    branches: [main]
+  schedule:
+    - cron: '0 12 * * 1' # Every Monday at 12:00 UTC
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Skip CI preflight check and release anyway'
+        type: boolean
+        default: false
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 permissions:
   contents: write
+  issues: write
   pull-requests: write
+  id-token: write
 
 jobs:
-  release-please:
-    name: release-please
+  release:
+    name: Release
     runs-on: ubuntu-latest
     steps:
-      # release-please only cuts a release when the commits since the last
-      # tag contain at least one conventional-commit `feat:` or `fix:` (or
-      # an explicit `!` / `BREAKING CHANGE:` for majors). Commits that lack
-      # a type are ignored. This is the "don't release without a type"
-      # guarantee — see release-please-config.json for the full rule set.
-      - uses: googleapis/release-please-action@v4
+      - name: Checkout repository
+        uses: actions/checkout@v6
         with:
-          config-file: release-please-config.json
-          manifest-file: .release-please-manifest.json
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify latest CI Pipeline on main succeeded
+        if: ${{ !inputs.force }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          CONCLUSION=$(gh run list \
+            --workflow "CI Pipeline" \
+            --branch main \
+            --event push \
+            --limit 1 \
+            --json conclusion \
+            --jq '.[0].conclusion')
+          echo "Latest CI Pipeline conclusion on main: ${CONCLUSION:-<none>}"
+          if [ "$CONCLUSION" != "success" ]; then
+            echo "::error::Latest CI Pipeline run on main is '$CONCLUSION' — refusing to release."
+            exit 1
+          fi
+
+      - name: Semantic Release
+        uses: cycjimmy/semantic-release-action@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
