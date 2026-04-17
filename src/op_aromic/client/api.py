@@ -127,12 +127,23 @@ class AutomicAPI:
     ) -> Iterator[dict[str, Any]]:
         """List all objects of a given kind, optionally scoped to a folder.
 
-        Pagination is handled by the underlying ``list_objects`` iterator.
+        When ``folder`` is provided the request goes through
+        ``GET /{client_id}/folderobjects/{folder_path}`` — the canonical
+        folder-scoped listing endpoint per Automic AE REST swagger v21.
+        Without a folder the legacy ``GET /{client_id}/objects?type=...``
+        endpoint is used (unverified against a live instance).
+
+        Pagination is handled by the underlying iterator in both cases.
         """
         automic_type = _KIND_TO_AUTOMIC_TYPE.get(kind)
         if automic_type is None:
             raise ValueError(f"unknown kind for listing: {kind!r}")
-        yield from self._client.list_objects(object_type=automic_type, folder=folder)
+        if folder is not None:
+            yield from self._client.list_folder_objects(
+                folder, object_type=automic_type,
+            )
+        else:
+            yield from self._client.list_objects(object_type=automic_type)
 
     def object_exists(self, name: str) -> bool:
         """Cheap existence probe. True iff a GET for ``name`` returns 200."""

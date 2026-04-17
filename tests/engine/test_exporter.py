@@ -11,6 +11,7 @@ All HTTP is mocked via respx; no network access in this module.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -54,13 +55,19 @@ def _install_list_and_get(
     base: str,
     by_type: dict[str, list[dict[str, Any]]],
 ) -> None:
-    """Install list (by ?type=) and get-by-name responders for a fixture set."""
+    """Install list and get-by-name responders for a fixture set.
+
+    Handles two listing endpoints:
+    - ``GET /objects?type=...`` — used when no folder is specified.
+    - ``GET /folderobjects/{path}?type=...`` — used when a folder is specified
+      (B4: canonical folder-scoped listing per swagger v21).
+    """
 
     def list_responder(request: httpx.Request) -> httpx.Response:
         params = dict(request.url.params)
         typ = params.get("type")
         data = by_type.get(typ, []) if typ else []
-        # Honour the ``folder`` filter if the test passed one.
+        # For /objects endpoint, honour the ``folder`` query param as fallback.
         folder_filter = params.get("folder")
         if folder_filter:
             data = [d for d in data if d.get("Folder") == folder_filter]
@@ -68,7 +75,23 @@ def _install_list_and_get(
         max_rows = int(params.get("max_rows", 100))
         return httpx.Response(200, json={"data": data[start : start + max_rows]})
 
+    def folder_list_responder(request: httpx.Request) -> httpx.Response:
+        # Extract the folder path from the URL: /folderobjects/PROD/ETL → /PROD/ETL
+        path_parts = request.url.path.split("/folderobjects/", 1)
+        folder_path = "/" + path_parts[1] if len(path_parts) > 1 else "/"
+        params = dict(request.url.params)
+        typ = params.get("type")
+        data = by_type.get(typ, []) if typ else []
+        # Filter by folder path matching the URL segment.
+        data = [d for d in data if d.get("Folder") == folder_path]
+        start = int(params.get("start_row", 0))
+        max_rows = int(params.get("max_rows", 100))
+        return httpx.Response(200, json={"data": data[start : start + max_rows]})
+
     mock.get(f"{base}/objects").mock(side_effect=list_responder)
+    mock.get(url__regex=rf"{re.escape(base)}/folderobjects/.*").mock(
+        side_effect=folder_list_responder,
+    )
 
     for objs in by_type.values():
         for obj in objs:

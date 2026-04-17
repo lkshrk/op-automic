@@ -278,3 +278,38 @@ class AutomicClient:
             if len(objects) < params["max_rows"]:
                 break
             params["start_row"] += params["max_rows"]
+
+    def list_folder_objects(
+        self,
+        folder_path: str,
+        *,
+        object_type: str | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        """List objects via ``GET /{client_id}/folderobjects/{folder_path}``.
+
+        This is the canonical folder-scoped listing endpoint per Automic AE
+        REST swagger v21. The folder path is embedded in the URL rather than
+        passed as a query parameter.  Pagination uses the same
+        ``max_rows``/``start_row`` convention as ``list_objects``.
+
+        Items are yielded from the ``data`` array in each page response.
+        ``object_type`` narrows by Automic type string (e.g. ``"JOBS"``).
+        """
+        # Strip leading slash; the server path segment must not double-slash.
+        clean_path = folder_path.lstrip("/")
+        url = f"{self._base}/folderobjects/{clean_path}"
+        params: dict[str, Any] = {"max_rows": 100, "start_row": 0}
+        if object_type:
+            params["type"] = object_type
+
+        while True:
+            response = self._send_with_retry("GET", url, params=params)
+            self._raise_for_status(response)
+            data = response.json()
+            objects = data.get("data", [])
+            if not objects:
+                break
+            yield from objects
+            if len(objects) < params["max_rows"]:
+                break
+            params["start_row"] += params["max_rows"]

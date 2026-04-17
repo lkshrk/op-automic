@@ -89,7 +89,54 @@ def test_list_objects_typed_rejects_unknown_kind() -> None:
                 list(api.list_objects_typed("NotAKind"))
 
 
-def test_list_objects_typed_passes_folder() -> None:
+def test_list_objects_typed_with_folder_uses_folderobjects_endpoint() -> None:
+    # B4: folder-scoped listing uses GET /folderobjects/{path} not /objects?folder=
+    settings = _make_settings()
+    base = f"{settings.url}/{settings.client_id}"
+    with respx.mock(assert_all_called=False) as mock:
+        _mock_auth(mock, settings)
+        route = mock.get(f"{base}/folderobjects/PROD/ETL").mock(
+            return_value=httpx.Response(200, json={"data": [{"Name": "J1"}]}),
+        )
+        with AutomicClient(settings) as client:
+            api = AutomicAPI(client)
+            items = list(api.list_objects_typed("Job", folder="/PROD/ETL"))
+        assert route.called
+    assert items == [{"Name": "J1"}]
+
+
+def test_list_objects_typed_without_folder_uses_objects_endpoint() -> None:
+    # Without folder: uses legacy GET /objects?type=JOBS
+    settings = _make_settings()
+    base = f"{settings.url}/{settings.client_id}"
+    with respx.mock(assert_all_called=False) as mock:
+        _mock_auth(mock, settings)
+        route = mock.get(f"{base}/objects").mock(
+            return_value=httpx.Response(200, json={"data": [{"Name": "J1"}]}),
+        )
+        with AutomicClient(settings) as client:
+            api = AutomicAPI(client)
+            items = list(api.list_objects_typed("Job"))
+        assert route.called
+        assert "type=JOBS" in str(route.calls.last.request.url)
+    assert items == [{"Name": "J1"}]
+
+
+def test_list_folder_objects_strips_leading_slash() -> None:
+    # /PROD/ETL → GET /folderobjects/PROD/ETL (no double-slash)
+    settings = _make_settings()
+    base = f"{settings.url}/{settings.client_id}"
+    with respx.mock(assert_all_called=False) as mock:
+        _mock_auth(mock, settings)
+        route = mock.get(f"{base}/folderobjects/PROD/ETL").mock(
+            return_value=httpx.Response(200, json={"data": []}),
+        )
+        with AutomicClient(settings) as client:
+            list(client.list_folder_objects("/PROD/ETL"))
+        assert route.called
+
+
+def test_list_folder_objects_passes_type_param() -> None:
     settings = _make_settings()
     base = f"{settings.url}/{settings.client_id}"
     with respx.mock(assert_all_called=False) as mock:
@@ -100,11 +147,29 @@ def test_list_objects_typed_passes_folder() -> None:
             captured["url"] = str(request.url)
             return httpx.Response(200, json={"data": []})
 
-        mock.get(f"{base}/objects").mock(side_effect=responder)
+        mock.get(f"{base}/folderobjects/PROD").mock(side_effect=responder)
         with AutomicClient(settings) as client:
-            api = AutomicAPI(client)
-            list(api.list_objects_typed("Job", folder="/PROD/ETL"))
-    assert "folder=%2FPROD%2FETL" in captured["url"] or "folder=/PROD/ETL" in captured["url"]
+            list(client.list_folder_objects("/PROD", object_type="JOBS"))
+    assert "type=JOBS" in captured["url"]
+
+
+def test_list_folder_objects_paginates() -> None:
+    settings = _make_settings()
+    base = f"{settings.url}/{settings.client_id}"
+    page1 = {"data": [{"Name": f"OBJ{i}"} for i in range(100)]}
+    page2 = {"data": [{"Name": "OBJ_LAST"}]}
+    with respx.mock(assert_all_called=False) as mock:
+        _mock_auth(mock, settings)
+        call_count = {"n": 0}
+
+        def responder(request: httpx.Request) -> httpx.Response:
+            call_count["n"] += 1
+            return httpx.Response(200, json=page1 if call_count["n"] == 1 else page2)
+
+        mock.get(f"{base}/folderobjects/PROD").mock(side_effect=responder)
+        with AutomicClient(settings) as client:
+            items = list(client.list_folder_objects("/PROD"))
+    assert len(items) == 101
 
 
 def test_object_exists_true() -> None:

@@ -133,33 +133,24 @@ def test_export_overwrite_flag_passes_through(tmp_path: Path) -> None:
 
 
 def test_export_folder_filter(tmp_path: Path) -> None:
+    # B4: folder-scoped export uses GET /folderobjects/{path} not /objects?folder=
     runner = CliRunner()
     base = "http://export.test/ae/api/v1/100"
-    job_a = _load_fixture("job.json")
+    job_a = _load_fixture("job.json")  # Folder: /PROD/ETL
     job_b = {**job_a, "Name": "OTHER.JOB", "Folder": "/TEST"}
 
     with respx.mock(assert_all_called=False) as mock:
         mock.post(f"http://export.test/ae/api/v1{_AUTH_PATH}").mock(
             return_value=httpx.Response(200, json={"token": "t", "expires_in": 3600}),
         )
-
-        def list_responder(request: httpx.Request) -> httpx.Response:
-            params = dict(request.url.params)
-            if params.get("type") != "JOBS":
-                return httpx.Response(200, json={"data": []})
-            folder = params.get("folder")
-            pool = [job_a, job_b]
-            if folder:
-                pool = [d for d in pool if d.get("Folder") == folder]
-            return httpx.Response(200, json={"data": pool})
-
-        mock.get(f"{base}/objects").mock(side_effect=list_responder)
+        # Folder-scoped list: GET /folderobjects/PROD/ETL returns only job_a.
+        mock.get(f"{base}/folderobjects/PROD/ETL").mock(
+            return_value=httpx.Response(200, json={"data": [job_a]}),
+        )
         mock.get(f"{base}/objects/ETL.EXTRACT").mock(
             return_value=httpx.Response(200, json=job_a),
         )
-        mock.get(f"{base}/objects/OTHER.JOB").mock(
-            return_value=httpx.Response(200, json=job_b),
-        )
+        # OTHER.JOB is never listed so never fetched; no mock needed.
 
         result = runner.invoke(
             app,

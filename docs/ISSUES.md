@@ -48,6 +48,13 @@ Scratchpad populated during autonomous implementation. Each entry:
 - **Default chosen**: keep current shape; add `_paginate` helper.
 - **Resolution needed**: verify against AWA REST docs.
 
+### Folder-scoped listing endpoint — resolved
+- **Phase**: 6 (B4)
+- **Severity**: medium
+- **Context**: `list_objects` used `GET /{client_id}/objects?folder=...` but swagger v21 exposes a dedicated endpoint `GET /{client_id}/folderobjects/{folder_path}`.
+- **Default chosen**: `AutomicClient.list_folder_objects(folder_path, *, object_type)` added for the canonical endpoint. `api.py::list_objects_typed` routes to `list_folder_objects` when `folder` is provided and falls back to `list_objects` (no folder param) otherwise.
+- **Resolution needed**: verify the `/folderobjects/` response shape matches the `data` array assumption; pagination params (`max_rows`/`start_row`) may differ on a live instance.
+
 ### Response envelope (single-object GET) — partially resolved
 - **Phase**: 6 (B3)
 - **Severity**: medium
