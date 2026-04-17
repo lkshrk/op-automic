@@ -14,6 +14,7 @@ from rich.console import Console
 
 from op_aromic.engine.differ import FieldChange, ObjectDiff
 from op_aromic.engine.planner import Plan
+from op_aromic.engine.revision import compute_revision_from_canonical
 
 _ACTION_STYLE: dict[str, str] = {
     "create": "bold green",
@@ -38,10 +39,57 @@ def _fmt_value(value: Any) -> str:
     return repr(value)
 
 
+def _short_revision(revision: str | None) -> str:
+    """Render a ``sha256:<hex>`` revision as ``abc12345`` for compact display."""
+    if not revision:
+        return ""
+    body = revision.split(":", 1)[-1]
+    return body[:8]
+
+
+def _diff_revisions(diff: ObjectDiff) -> tuple[str | None, str | None]:
+    """Return ``(desired_rev, actual_rev)`` for a single diff.
+
+    Computed lazily from the canonical dicts so presentation stays
+    decoupled from model state. Noops show the same revision twice by
+    design — they are identical.
+    """
+    desired = (
+        compute_revision_from_canonical(diff.desired)
+        if diff.desired is not None
+        else None
+    )
+    actual = (
+        compute_revision_from_canonical(diff.actual)
+        if diff.actual is not None
+        else None
+    )
+    return desired, actual
+
+
 def _render_diff(diff: ObjectDiff, console: Console) -> None:
     prefix = _ACTION_PREFIX[diff.action]
     style = _ACTION_STYLE[diff.action]
-    header = f"{prefix} {diff.action.upper():<6} {diff.kind:<9} {diff.folder}/{diff.name}"
+    desired_rev, actual_rev = _diff_revisions(diff)
+    # Header layout:
+    #   create: rev=<new>
+    #   update: rev=<old>→<new>   (drift visible at a glance)
+    #   delete: rev=<old>         (content going away)
+    #   noop:   rev=<rev>         (informational)
+    if diff.action == "create":
+        rev_fragment = f"rev={_short_revision(desired_rev)}"
+    elif diff.action == "delete":
+        rev_fragment = f"rev={_short_revision(actual_rev)}"
+    elif diff.action == "update":
+        rev_fragment = (
+            f"rev={_short_revision(actual_rev)}→{_short_revision(desired_rev)}"
+        )
+    else:
+        rev_fragment = f"rev={_short_revision(desired_rev or actual_rev)}"
+    header = (
+        f"{prefix} {diff.action.upper():<6} {diff.kind:<9} "
+        f"{diff.folder}/{diff.name}  {rev_fragment}"
+    )
     console.print(header, style=style)
     for change in diff.changes:
         _render_change(change, console)
@@ -119,11 +167,14 @@ def envelope(
 
 
 def _diff_to_dict(diff: ObjectDiff) -> dict[str, Any]:
+    desired_rev, actual_rev = _diff_revisions(diff)
     return {
         "action": diff.action,
         "kind": diff.kind,
         "name": diff.name,
         "folder": diff.folder,
+        "desiredRevision": desired_rev,
+        "actualRevision": actual_rev,
         "desired": diff.desired,
         "actual": diff.actual,
         "changes": [

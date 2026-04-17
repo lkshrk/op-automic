@@ -33,6 +33,7 @@ from typing import Any, Literal
 
 from op_aromic.client.api import AutomicAPI
 from op_aromic.engine.normalizer import IGNORED_FIELDS_BY_KIND
+from op_aromic.engine.revision import compute_revision
 from op_aromic.engine.yaml_writer import write_manifests_to_file
 from op_aromic.models.base import KIND_REGISTRY, Manifest
 
@@ -139,10 +140,13 @@ def _extract_raw(
 
 
 def _manifest_envelope(payload: dict[str, Any], kind: str) -> dict[str, Any]:
-    """Reconstruct the top-level manifest envelope (apiVersion + metadata).
+    """Reconstruct the top-level manifest envelope (apiVersion + metadata + status).
 
     Handles both v21 nested payloads (``general_attributes.name`` +
     ``_envelope_path`` folder) and legacy flat payloads (``Name`` + ``Folder``).
+    Server-side read-only fields (VersionNumber, LastModified, LastModifiedBy)
+    are routed into the ``status`` block so they survive export without
+    polluting the diff-relevant spec content.
     """
     if "general_attributes" in payload:
         # v21 nested shape.
@@ -166,11 +170,58 @@ def _manifest_envelope(payload: dict[str, Any], kind: str) -> dict[str, Any]:
     if isinstance(annotations, dict) and annotations:
         metadata["annotations"] = {str(k): str(v) for k, v in annotations.items()}
 
-    return {
+    envelope: dict[str, Any] = {
         "apiVersion": "aromic.io/v1",
         "kind": kind,
         "metadata": metadata,
     }
+    status = _extract_status(payload)
+    if status:
+        envelope["status"] = status
+    return envelope
+
+
+def _extract_status(payload: dict[str, Any]) -> dict[str, Any]:
+    """Pluck server-observed version/audit fields from an Automic payload.
+
+    Source priority:
+      1. v21 ``general_attributes`` (``last_modified``, ``last_modified_by``,
+         ``version_number``) when present.
+      2. Legacy flat top-level keys (``LastModified``, ``LastModifiedBy``,
+         ``VersionNumber``).
+
+    Missing fields are simply omitted; callers validate a ``Status``
+    model from whatever is present.
+    """
+    ga = payload.get("general_attributes") or {}
+
+    def _pick(*keys: str) -> Any | None:
+        for k in keys:
+            if k in ga and ga[k] not in (None, ""):
+                return ga[k]
+            if k in payload and payload[k] not in (None, ""):
+                return payload[k]
+        return None
+
+    out: dict[str, Any] = {}
+    raw_version = _pick("version_number", "VersionNumber", "Version")
+    if raw_version is not None:
+        try:
+            out["automicVersion"] = int(raw_version)
+        except (TypeError, ValueError):
+            # Version field came through as a non-numeric string; keep it
+            # out of the status block rather than fail the export.
+            pass
+
+    last_modified = _pick("last_modified", "LastModified", "OH_LASTMODIFIED")
+    if last_modified is not None:
+        out["lastModified"] = str(last_modified)
+
+    last_modified_by = _pick("last_modified_by", "LastModifiedBy")
+    if last_modified_by is not None:
+        out["lastModifiedBy"] = str(last_modified_by)
+
+    return out
 
 
 def _inverse_workflow(payload: dict[str, Any]) -> dict[str, Any]:
@@ -421,12 +472,24 @@ _INVERSES = {
 
 
 def _payload_to_manifest(kind: str, payload: dict[str, Any]) -> Manifest:
-    """Assemble a fully validated :class:`Manifest` from an Automic payload."""
+    """Assemble a fully validated :class:`Manifest` from an Automic payload.
+
+    The revision is computed last, on the fully-built manifest, so it
+    mirrors exactly what the loader recomputes on read-back. That keeps
+    the round-trip stable: export → load → plan must not show a
+    revision diff.
+    """
     if kind not in _INVERSES:
         raise ValueError(f"no inverse serializer for kind {kind!r}")
     envelope = _manifest_envelope(payload, kind)
     envelope["spec"] = _INVERSES[kind](payload)
-    return Manifest.model_validate(envelope)
+    manifest = Manifest.model_validate(envelope)
+    revision = compute_revision(manifest)
+    # Metadata is frozen; re-hydrate it with the computed revision rather
+    # than mutating. Pydantic model_copy(update=...) on a frozen model
+    # returns a new instance.
+    stamped_metadata = manifest.metadata.model_copy(update={"revision": revision})
+    return manifest.model_copy(update={"metadata": stamped_metadata})
 
 
 # ---------------------------------------------------------------------------

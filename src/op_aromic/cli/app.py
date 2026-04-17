@@ -44,6 +44,7 @@ from op_aromic.engine.differ import FieldChange, ObjectDiff
 from op_aromic.engine.errors import EngineError
 from op_aromic.engine.exporter import Layout
 from op_aromic.engine.exporter import export as export_manifests
+from op_aromic.engine.ledger import ledger_root, path_for as ledger_path_for, read_rows
 from op_aromic.engine.loader import load_manifests
 from op_aromic.engine.planner import Plan, build_plan, build_plan_parallel
 from op_aromic.engine.validator import Issue, Severity, validate_manifests
@@ -405,6 +406,17 @@ def _load_and_validate(target_path: Path) -> list:  # type: ignore[type-arg]
             "fix manifests before continuing.",
         )
         raise typer.Exit(code=1)
+    # Revision-mismatch warnings: the on-disk revision disagreed with the
+    # recomputed hash for one or more manifests. Surface non-fatally so
+    # normal workflows (hand-edit + re-apply) stay ergonomic.
+    mismatches = [lm for lm in loaded if lm.revision_mismatch]
+    for lm in mismatches:
+        _error_console.print(
+            f"[yellow]revision mismatch[/] "
+            f"{lm.manifest.kind}/{lm.manifest.metadata.name} "
+            f"(declared {lm.declared_revision}, "
+            f"computed {lm.manifest.metadata.revision}) — will re-stamp on apply.",
+        )
     return loaded
 
 
@@ -1135,6 +1147,211 @@ def auth_check(
     _console.print(
         f"[bold green]OK[/] authenticated against {settings.url} "
         f"(client={settings.client_id}, user={settings.user})",
+    )
+
+
+@app.command()
+def history(
+    ctx: typer.Context,
+    target: str = typer.Argument(
+        ...,
+        help="Object identity as 'Kind/Name' (e.g. 'Workflow/ETL.DAILY').",
+    ),
+    ledger_dir: str | None = typer.Option(
+        None,
+        "--ledger-dir",
+        help=(
+            "Ledger root directory. Defaults to $AROMIC_LEDGER_DIR, "
+            "else ./revisions."
+        ),
+    ),
+    limit: int = typer.Option(
+        20, "--limit", "-n", min=1, help="Show only the most recent N rows.",
+    ),
+) -> None:
+    """Print the revision history ledger for one object."""
+    output_mode = _output_mode(ctx)
+    if "/" not in target:
+        _error_console.print(
+            "[bold red]ERROR[/] target must be 'Kind/Name'",
+        )
+        raise typer.Exit(code=1)
+    kind, name = target.split("/", 1)
+    root = Path(ledger_dir) if ledger_dir else None
+    rows = read_rows(kind, name, root=root)
+    recent = rows[-limit:]
+
+    if output_mode == "json":
+        _emit_json(
+            envelope(
+                command="history",
+                status="ok",
+                summary={"rows": len(recent), "total": len(rows)},
+                details={"rows": recent},
+            ),
+        )
+        return
+
+    if not rows:
+        _console.print(
+            f"[dim]no ledger entries for {kind}/{name} under "
+            f"{ledger_path_for(kind, name, root=root)}[/dim]",
+        )
+        return
+
+    _console.print(
+        f"[bold]{kind}/{name}[/]  ({len(recent)} of {len(rows)} shown)",
+    )
+    for row in recent:
+        rev = row.get("revision") or "-"
+        short = rev.split(":", 1)[-1][:8] if rev and rev != "-" else "-"
+        ver_before = row.get("automicVersionBefore")
+        ver_after = row.get("automicVersionAfter")
+        ver_frag = ""
+        if ver_before is not None or ver_after is not None:
+            ver_frag = f"  v:{ver_before or '-'}→{ver_after or '-'}"
+        _console.print(
+            f"  {row.get('ts','?')}  {row.get('action','?'):<6}  "
+            f"rev:{short}  git:{row.get('gitSha') or '-'}{ver_frag}  "
+            f"by:{row.get('by','unknown')}",
+        )
+
+
+@app.command()
+def rollback(
+    ctx: typer.Context,
+    target: str = typer.Argument(
+        ...,
+        help="Object identity as 'Kind/Name' (e.g. 'Workflow/ETL.DAILY').",
+    ),
+    to: str = typer.Option(
+        ...,
+        "--to",
+        help=(
+            "Target revision. Accepts the full 'sha256:<hex>' or the "
+            "8-char short form as printed by 'history'."
+        ),
+    ),
+    manifests_path: str = typer.Option(
+        ".",
+        "--manifests",
+        "-m",
+        help="Manifests root — used to locate the file to restore.",
+    ),
+    ledger_dir: str | None = typer.Option(
+        None, "--ledger-dir", help="Ledger root (see 'history').",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Print the git command without executing.",
+    ),
+) -> None:
+    """Restore an object's manifest file to the git commit that produced ``--to``.
+
+    Strategy: look up the ledger row whose revision matches ``--to``, grab
+    its ``gitSha``, then ``git checkout <sha> -- <manifest file>``. The
+    caller re-runs ``aromic apply`` afterwards to push the restored
+    content to Automic — keeping rollback as an explicit two-step flow so
+    an operator can review the diff before writing.
+    """
+    import subprocess
+
+    output_mode = _output_mode(ctx)
+    if "/" not in target:
+        _error_console.print("[bold red]ERROR[/] target must be 'Kind/Name'")
+        raise typer.Exit(code=1)
+    kind, name = target.split("/", 1)
+
+    root = Path(ledger_dir) if ledger_dir else None
+    rows = read_rows(kind, name, root=root)
+    if not rows:
+        _error_console.print(
+            f"[bold red]ERROR[/] no ledger history for {kind}/{name} under "
+            f"{ledger_root(root)}",
+        )
+        raise typer.Exit(code=1)
+
+    # Short form matches any row whose revision's hex-suffix starts with the query.
+    wanted = to.lower()
+    hit = None
+    for row in reversed(rows):  # newest first: prefer the most recent match
+        rev = row.get("revision") or ""
+        suffix = rev.split(":", 1)[-1]
+        if rev == wanted or (len(wanted) >= 4 and suffix.startswith(wanted)):
+            hit = row
+            break
+    if hit is None:
+        _error_console.print(
+            f"[bold red]ERROR[/] no ledger row matches revision {to!r}",
+        )
+        raise typer.Exit(code=1)
+
+    git_sha = hit.get("gitSha")
+    if not git_sha:
+        _error_console.print(
+            f"[bold red]ERROR[/] matching ledger row has no gitSha — "
+            "the original apply ran outside a git repo. Rollback needs git history.",
+        )
+        raise typer.Exit(code=1)
+
+    # Locate the manifest file by scanning manifests_path. Not pinned by
+    # the ledger because file paths can change across renames.
+    manifests_root = Path(manifests_path)
+    manifest_file: Path | None = None
+    try:
+        loaded = load_manifests(manifests_root)
+    except EngineError as exc:
+        _error_console.print(f"[bold red]ERROR[/] loading manifests: {exc}")
+        raise typer.Exit(code=1) from exc
+    for lm in loaded:
+        if lm.manifest.kind == kind and lm.manifest.metadata.name == name:
+            manifest_file = lm.source_path
+            break
+    if manifest_file is None:
+        _error_console.print(
+            f"[bold red]ERROR[/] {kind}/{name} not found under {manifests_root}; "
+            "rollback needs a source file to restore.",
+        )
+        raise typer.Exit(code=1)
+
+    cmd = ["git", "checkout", git_sha, "--", str(manifest_file)]
+
+    if output_mode == "json":
+        _emit_json(
+            envelope(
+                command="rollback",
+                status="ok" if not dry_run else "dry-run",
+                summary={
+                    "kind": kind,
+                    "name": name,
+                    "revision": hit.get("revision"),
+                    "gitSha": git_sha,
+                    "file": str(manifest_file),
+                    "dry_run": dry_run,
+                },
+                details={"command": cmd},
+            ),
+        )
+        if dry_run:
+            return
+
+    if dry_run:
+        _console.print(
+            f"[dim]would run:[/] {' '.join(cmd)}",
+        )
+        _console.print(
+            "[dim]then run `aromic apply` to push the restored content.[/]",
+        )
+        return
+
+    try:
+        subprocess.run(cmd, check=True)  # noqa: S603 — argv built from vetted parts
+    except (OSError, subprocess.SubprocessError) as exc:
+        _error_console.print(f"[bold red]ERROR[/] git checkout failed: {exc}")
+        raise typer.Exit(code=1) from exc
+
+    _console.print(
+        f"[bold green]OK[/] restored {manifest_file} to revision "
+        f"{hit.get('revision')} (git {git_sha}). Run `aromic apply` to push.",
     )
 
 

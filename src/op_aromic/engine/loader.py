@@ -15,6 +15,7 @@ import yaml
 from pydantic import ValidationError as PydanticValidationError
 
 from op_aromic.engine.errors import ManifestError
+from op_aromic.engine.revision import compute_revision, is_revision
 from op_aromic.models.base import KIND_REGISTRY, Manifest
 
 _YAML_SUFFIXES = frozenset({".yaml", ".yml"})
@@ -49,6 +50,14 @@ class LoadedManifest:
     source_path: Path
     doc_index: int
     manifest: Manifest
+    # True when the on-disk ``metadata.revision`` differed from the hash
+    # recomputed at load time. Consumers (CLI, validator) decide whether
+    # that is a warning or an error — the loader never rejects on its own
+    # so hand-edits remain viable.
+    revision_mismatch: bool = False
+    # Whatever was written to disk for ``metadata.revision``; may be None
+    # when the manifest was hand-authored without a revision.
+    declared_revision: str | None = None
 
 
 def _iter_manifest_files(root: Path) -> list[Path]:
@@ -132,7 +141,36 @@ def _build_manifest(doc: dict[str, Any], *, path: Path, doc_index: int) -> Manif
             line=doc_line if isinstance(doc_line, int) else None,
         ) from exc
 
+    # Shape check on the declared revision: malformed strings are rejected
+    # loudly because they indicate file corruption, not hand-editing.
+    declared = manifest.metadata.revision
+    if declared is not None and not is_revision(declared):
+        raise ManifestError(
+            f"metadata.revision must be 'sha256:<64 hex>', got {declared!r}",
+            source_path=path,
+            line=doc_line if isinstance(doc_line, int) else None,
+        )
+
     return manifest
+
+
+def _stamp_and_check_revision(
+    manifest: Manifest,
+) -> tuple[Manifest, str | None, bool]:
+    """Compute the canonical revision and reconcile it with what was on disk.
+
+    Returns ``(manifest_with_revision, declared_revision, mismatch)``.
+    The returned manifest always carries the freshly-computed revision in
+    ``metadata.revision`` so downstream code works uniformly regardless
+    of whether the file originally declared one.
+    """
+    declared = manifest.metadata.revision
+    computed = compute_revision(manifest)
+    mismatch = declared is not None and declared != computed
+    if declared != computed:
+        stamped_metadata = manifest.metadata.model_copy(update={"revision": computed})
+        manifest = manifest.model_copy(update={"metadata": stamped_metadata})
+    return manifest, declared, mismatch
 
 
 def load_manifests(path: Path | str) -> list[LoadedManifest]:
@@ -150,11 +188,14 @@ def load_manifests(path: Path | str) -> list[LoadedManifest]:
         docs = _parse_docs(file_path)
         for doc_index, doc in enumerate(docs):
             manifest = _build_manifest(doc, path=file_path, doc_index=doc_index)
+            manifest, declared, mismatch = _stamp_and_check_revision(manifest)
             results.append(
                 LoadedManifest(
                     source_path=file_path,
                     doc_index=doc_index,
                     manifest=manifest,
+                    revision_mismatch=mismatch,
+                    declared_revision=declared,
                 ),
             )
     return results

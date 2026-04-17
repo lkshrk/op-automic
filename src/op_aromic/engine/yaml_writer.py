@@ -187,6 +187,24 @@ def _manifest_to_ordered_dict(manifest: Manifest) -> dict[str, Any]:
     if "spec" in ordered and isinstance(ordered["spec"], dict):
         ordered["spec"] = _ordered_spec(manifest.kind, ordered["spec"])
 
+    # ``status`` is omitted entirely when the manifest has none (user-authored
+    # files should not carry a null status). When present, preserve the
+    # Status model's field order and drop any individually-null fields so
+    # partial server responses render cleanly.
+    status_key = "status"
+    if status_key in ordered:
+        status_value = ordered[status_key]
+        if status_value is None:
+            del ordered[status_key]
+        elif isinstance(status_value, dict) and manifest.status is not None:
+            ordered[status_key] = _reorder_by_model(
+                status_value,
+                manifest.status.__class__,
+                drop_empty=True,
+            )
+            if not ordered[status_key]:
+                del ordered[status_key]
+
     return ordered
 
 
@@ -201,16 +219,22 @@ def _reorder_by_model(
     ``drop_empty=True`` skips keys whose value is ``None`` or an empty
     dict; used on the metadata block so optional fields do not leak null
     defaults into the file.
+
+    Alias-aware: dicts produced by ``model_dump(by_alias=True)`` use the
+    alias key (e.g. ``automicVersion``), so we prefer the alias when the
+    field declares one and fall back to the Python field name.
     """
     ordered: dict[str, Any] = {}
-    for name in model.model_fields:
-        if name not in value:
+    for name, field_info in model.model_fields.items():
+        key = field_info.alias or name
+        present_key = key if key in value else (name if name in value else None)
+        if present_key is None:
             continue
-        v = value[name]
+        v = value[present_key]
         if drop_empty and (v is None or v == {}):
             continue
         nested = _field_submodel(model, name)
-        ordered[name] = _order_value(v, nested)
+        ordered[present_key] = _order_value(v, nested)
     for name, v in value.items():
         if name not in ordered and not (drop_empty and (v is None or v == {})):
             ordered[name] = _order_value(v, None)

@@ -22,6 +22,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from pathlib import Path
+
 from op_aromic.client.errors import FolderMissingError, NotFoundError
 from op_aromic.client.http import AutomicClient
 from op_aromic.engine.dependency import (
@@ -29,7 +31,9 @@ from op_aromic.engine.dependency import (
     DependencyGraph,
 )
 from op_aromic.engine.differ import ObjectDiff
+from op_aromic.engine.ledger import append_row as ledger_append
 from op_aromic.engine.planner import Plan
+from op_aromic.engine.revision import compute_revision_from_canonical
 from op_aromic.engine.serializer import manifest_to_automic_payload
 from op_aromic.models.base import Manifest
 
@@ -279,6 +283,33 @@ def _check_concurrent_edit(
 PlanMarkers = dict[tuple[str, str], Any]
 
 
+def _extract_automic_version(payload: dict[str, Any] | None) -> int | None:
+    """Pluck ``VersionNumber``-style fields from a raw Automic payload.
+
+    Used by the applier to stamp ``automicVersionBefore`` into the
+    ledger. Returns None when the payload does not carry a version
+    (older/legacy endpoints) so the row stays well-formed.
+    """
+    if not payload:
+        return None
+    ga = payload.get("general_attributes") or {}
+    for source in (ga, payload):
+        for key in ("version_number", "VersionNumber", "Version"):
+            if key in source and source[key] not in (None, ""):
+                try:
+                    return int(source[key])
+                except (TypeError, ValueError):
+                    continue
+    return None
+
+
+def _refetch_automic_version(client: AutomicClient, name: str) -> int | None:
+    try:
+        return _extract_automic_version(client.get_object(name))
+    except NotFoundError:
+        return None
+
+
 def apply(
     plan: Plan,
     client: AutomicClient,
@@ -289,6 +320,7 @@ def apply(
     on_progress: ProgressCallback | None = None,
     plan_markers: PlanMarkers | None = None,
     auto_create_folders: bool = True,
+    ledger_dir: Path | None = None,
 ) -> ApplyResult:
     """Execute ``plan`` against ``client`` in two passes (upsert, wire).
 
@@ -329,6 +361,7 @@ def apply(
                 ),
             )
             continue
+        version_before = _refetch_automic_version(client, diff.name)
         try:
             client.delete_object(diff.name)
         except Exception as exc:
@@ -341,6 +374,15 @@ def apply(
         progress("delete", diff.name)
         successes.append(
             SuccessfulApply(kind=diff.kind, name=diff.name, action="delete"),
+        )
+        ledger_append(
+            kind=diff.kind,
+            name=diff.name,
+            action="delete",
+            revision=None,
+            automic_version_before=version_before,
+            automic_version_after=None,
+            root=ledger_dir,
         )
 
     # ---- Pass 1: upsert with refs stripped -----------------------------
@@ -425,6 +467,13 @@ def apply(
             pass1_failed = True
             continue
 
+        # Capture the pre-write version for the ledger. Creates have no
+        # "before"; updates we know exist, so this is a safe extra fetch.
+        version_before = (
+            _refetch_automic_version(client, diff.name)
+            if diff.action == "update"
+            else None
+        )
         try:
             if diff.action == "create":
                 client.create_object(stripped)
@@ -449,6 +498,23 @@ def apply(
                 name=diff.name,
                 action="create" if diff.action == "create" else "update",
             ),
+        )
+        revision = (
+            compute_revision_from_canonical(diff.desired)
+            if diff.desired is not None
+            else None
+        )
+        # Ledger is written now (pass 1) even when pass 2 follows, because
+        # pass 2 is just a refs-wiring re-PUT of the same content; the
+        # semantic revision is identical.
+        ledger_append(
+            kind=diff.kind,
+            name=diff.name,
+            action="create" if diff.action == "create" else "update",
+            revision=revision,
+            automic_version_before=version_before,
+            automic_version_after=None,
+            root=ledger_dir,
         )
         if _payloads_differ(full_payload, stripped):
             pass2_needed.append((diff, full_payload))
