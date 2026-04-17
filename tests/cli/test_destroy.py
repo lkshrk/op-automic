@@ -55,6 +55,7 @@ def test_destroy_without_confirm_exits_1(env: None, tmp_path: Path) -> None:
 
 
 def test_destroy_with_confirm_runs(env: None, tmp_path: Path) -> None:
+    # B5: DELETE not supported in v21 — records not_supported, exits 2 (partial).
     _write_manifest(tmp_path)
     base = "http://cli.test/ae/api/v1/100"
     with respx.mock(assert_all_called=False) as mock:
@@ -70,15 +71,13 @@ def test_destroy_with_confirm_runs(env: None, tmp_path: Path) -> None:
                 },
             ),
         )
-        delete_route = mock.delete(f"{base}/objects/X").mock(
-            return_value=httpx.Response(204),
-        )
         result = _runner.invoke(
             app,
             ["destroy", str(tmp_path), "--confirm", "--auto-approve"],
         )
-    assert delete_route.called
-    assert result.exit_code == 0
+    # Partial because not_supported is non-empty; DELETE was not called.
+    assert result.exit_code == 2
+    assert "not supported" in result.output.lower() or "NOT SUPPORTED" in result.output
 
 
 def test_destroy_only_managed_refuses_unmanaged(env: None, tmp_path: Path) -> None:
@@ -105,19 +104,16 @@ def test_destroy_only_managed_refuses_unmanaged(env: None, tmp_path: Path) -> No
                 json={"Name": "X", "Type": "JOBS", "Folder": "/PROD"},
             ),
         )
-        delete_route = mock.delete(f"{base}/objects/X").mock(
-            return_value=httpx.Response(204),
-        )
         result = _runner.invoke(
             app,
             ["destroy", str(tmp_path), "--confirm", "--auto-approve"],
         )
-    assert not delete_route.called
     # Refused → partial exit.
     assert result.exit_code == 2
 
 
-def test_destroy_only_managed_false_deletes_anything(env: None, tmp_path: Path) -> None:
+def test_destroy_only_managed_false_records_not_supported(env: None, tmp_path: Path) -> None:
+    # B5: even with --no-only-managed, DELETE is not called (v21 limitation).
     (tmp_path / "x.yaml").write_text(
         "apiVersion: aromic.io/v1\n"
         "kind: Job\n"
@@ -138,9 +134,6 @@ def test_destroy_only_managed_false_deletes_anything(env: None, tmp_path: Path) 
                 json={"Name": "X", "Type": "JOBS", "Folder": "/PROD"},
             ),
         )
-        delete_route = mock.delete(f"{base}/objects/X").mock(
-            return_value=httpx.Response(204),
-        )
         result = _runner.invoke(
             app,
             [
@@ -151,8 +144,9 @@ def test_destroy_only_managed_false_deletes_anything(env: None, tmp_path: Path) 
                 "--no-only-managed",
             ],
         )
-    assert delete_route.called
-    assert result.exit_code == 0
+    # not_supported → partial exit.
+    assert result.exit_code == 2
+    assert "not supported" in result.output.lower() or "NOT SUPPORTED" in result.output
 
 
 def test_destroy_dry_run_makes_no_calls(env: None, tmp_path: Path) -> None:
@@ -204,13 +198,9 @@ def test_destroy_prompt_rejects_non_yes(env: None, tmp_path: Path) -> None:
                 },
             ),
         )
-        delete_route = mock.delete(f"{base}/objects/X").mock(
-            return_value=httpx.Response(204),
-        )
         result = _runner.invoke(
             app,
             ["destroy", str(tmp_path), "--confirm"],
             input="y\n",
         )
-    assert not delete_route.called
     assert result.exit_code == 1

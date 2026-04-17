@@ -1,4 +1,10 @@
-"""Tests for the destroyer — reverse-order deletes, managed-only guard, dry_run."""
+"""Tests for the destroyer — reverse-order deletes, managed-only guard, dry_run.
+
+B5: Automic AE REST v21 does not support DELETE on objects. The destroyer now
+records NotSupportedDelete entries instead of calling client.delete_object.
+Tests have been updated accordingly — no DELETE routes are mocked because no
+DELETE calls should occur.
+"""
 
 from __future__ import annotations
 
@@ -11,7 +17,7 @@ import respx
 from op_aromic.client.http import _AUTH_PATH, AutomicClient
 from op_aromic.config.settings import AutomicSettings
 from op_aromic.engine.dependency import build_graph
-from op_aromic.engine.destroyer import DestroyResult, destroy
+from op_aromic.engine.destroyer import DestroyResult, NotSupportedDelete, destroy
 from op_aromic.engine.loader import LoadedManifest
 from op_aromic.models.base import Manifest
 
@@ -60,18 +66,17 @@ def _unmanaged_payload(kind: str, name: str) -> dict[str, Any]:
 
 
 def test_destroy_reverse_order_workflow_before_job() -> None:
-    # Loaded: Job + Workflow. Destroy must DELETE Workflow first, Job second.
+    # B5: DELETE not supported — records not_supported in reverse dep order.
+    # Workflow (depends-on Job) must appear before Job in not_supported list.
     settings = _settings()
     base = f"{settings.url}/{settings.client_id}"
     loaded = [
         _loaded("Job", "J1"),
         _loaded("Workflow", "WF", {"tasks": []}),
     ]
-    call_order: list[str] = []
 
     with respx.mock(assert_all_called=False) as mock:
         _mock_auth(mock, settings)
-        # Pre-delete GET: both return managed payloads.
         mock.get(f"{base}/objects/J1").mock(
             return_value=httpx.Response(200, json=_managed_payload("JOBS", "J1")),
         )
@@ -79,24 +84,16 @@ def test_destroy_reverse_order_workflow_before_job() -> None:
             return_value=httpx.Response(200, json=_managed_payload("JOBP", "WF")),
         )
 
-        def delete_responder(request: httpx.Request) -> httpx.Response:
-            path = request.url.path
-            # Record only deletions of interest.
-            for name in ("J1", "WF"):
-                if path.endswith(f"/objects/{name}"):
-                    call_order.append(name)
-                    break
-            return httpx.Response(204)
-
-        mock.delete(f"{base}/objects/J1").mock(side_effect=delete_responder)
-        mock.delete(f"{base}/objects/WF").mock(side_effect=delete_responder)
-
         with AutomicClient(settings) as client:
             graph = build_graph(loaded)
             result = destroy(loaded, client, graph, only_managed=True)
-    assert result.status == "success"
-    # Workflow first, then Job — reverse dependency order.
-    assert call_order == ["WF", "J1"]
+
+    # B5: status is partial because not_supported is non-empty.
+    assert result.status == "partial"
+    assert len(result.not_supported) == 2
+    # Reverse dependency order: Workflow before Job.
+    names = [ns.name for ns in result.not_supported]
+    assert names == ["WF", "J1"]
 
 
 def test_destroy_refuses_unmanaged_by_default() -> None:
@@ -109,18 +106,18 @@ def test_destroy_refuses_unmanaged_by_default() -> None:
         mock.get(f"{base}/objects/J1").mock(
             return_value=httpx.Response(200, json=_unmanaged_payload("JOBS", "J1")),
         )
-        delete_route = mock.delete(f"{base}/objects/J1").mock(
-            return_value=httpx.Response(204),
-        )
         with AutomicClient(settings) as client:
             graph = build_graph(loaded)
             result = destroy(loaded, client, graph, only_managed=True)
-    assert not delete_route.called
+
+    # Unmanaged → refused, not not_supported (the check happens before the delete).
     assert len(result.refused) == 1
     assert result.refused[0].name == "J1"
+    assert len(result.not_supported) == 0
 
 
-def test_destroy_only_managed_false_deletes_anything() -> None:
+def test_destroy_only_managed_false_records_not_supported() -> None:
+    # B5: even with only_managed=False, DELETE is not called; not_supported instead.
     settings = _settings()
     base = f"{settings.url}/{settings.client_id}"
     loaded = [_loaded("Job", "J1")]
@@ -130,14 +127,13 @@ def test_destroy_only_managed_false_deletes_anything() -> None:
         mock.get(f"{base}/objects/J1").mock(
             return_value=httpx.Response(200, json=_unmanaged_payload("JOBS", "J1")),
         )
-        delete_route = mock.delete(f"{base}/objects/J1").mock(
-            return_value=httpx.Response(204),
-        )
         with AutomicClient(settings) as client:
             graph = build_graph(loaded)
             result = destroy(loaded, client, graph, only_managed=False)
-    assert delete_route.called
-    assert result.status == "success"
+
+    assert len(result.not_supported) == 1
+    assert result.not_supported[0].name == "J1"
+    assert result.status == "partial"
 
 
 def test_destroy_dry_run_makes_no_calls() -> None:
@@ -150,36 +146,33 @@ def test_destroy_dry_run_makes_no_calls() -> None:
         mock.get(f"{base}/objects/J1").mock(
             return_value=httpx.Response(200, json=_managed_payload("JOBS", "J1")),
         )
-        delete_route = mock.delete(f"{base}/objects/J1").mock(
-            return_value=httpx.Response(500, text="should not be called"),
-        )
         with AutomicClient(settings) as client:
             graph = build_graph(loaded)
             result = destroy(loaded, client, graph, dry_run=True)
-    assert not delete_route.called
+
     assert isinstance(result, DestroyResult)
     # Dry-run logs the intended deletes as successes so the CLI can render them.
     assert result.status == "success"
     assert len(result.successes) == 1
+    # No not_supported in dry run — the API path is never reached.
+    assert len(result.not_supported) == 0
 
 
 def test_destroy_missing_object_is_noop_not_failure() -> None:
     # If a declared object doesn't exist on the server, destroy treats that
-    # as "already gone" — success, no DELETE call.
+    # as "already gone" — success, no not_supported entry.
     settings = _settings()
     base = f"{settings.url}/{settings.client_id}"
     loaded = [_loaded("Job", "GHOST")]
     with respx.mock(assert_all_called=False) as mock:
         _mock_auth(mock, settings)
         mock.get(f"{base}/objects/GHOST").mock(return_value=httpx.Response(404))
-        delete_route = mock.delete(f"{base}/objects/GHOST").mock(
-            return_value=httpx.Response(500),
-        )
         with AutomicClient(settings) as client:
             graph = build_graph(loaded)
             result = destroy(loaded, client, graph, only_managed=True)
-    assert not delete_route.called
     assert result.status == "success"
+    assert len(result.successes) == 1
+    assert len(result.not_supported) == 0
 
 
 def test_destroy_kind_precedence_within_reverse_order() -> None:
@@ -194,7 +187,6 @@ def test_destroy_kind_precedence_within_reverse_order() -> None:
         _loaded("Schedule", "SCH", {"entries": []}),
         _loaded("Workflow", "WF", {"tasks": []}),
     ]
-    call_order: list[str] = []
 
     with respx.mock(assert_all_called=False) as mock:
         _mock_auth(mock, settings)
@@ -203,49 +195,34 @@ def test_destroy_kind_precedence_within_reverse_order() -> None:
                 return_value=httpx.Response(200, json=_managed_payload("T", name)),
             )
 
-            def delete_responder(
-                request: httpx.Request, _name: str = name,
-            ) -> httpx.Response:
-                call_order.append(_name)
-                return httpx.Response(204)
-
-            mock.delete(f"{base}/objects/{name}").mock(side_effect=delete_responder)
-
         with AutomicClient(settings) as client:
             graph = build_graph(loaded)
-            destroy(loaded, client, graph, only_managed=True)
+            result = destroy(loaded, client, graph, only_managed=True)
 
-    assert call_order == ["WF", "SCH", "JOB", "VAR", "CAL"]
+    # B5: all recorded as not_supported in reverse dependency order.
+    names = [ns.name for ns in result.not_supported]
+    assert names == ["WF", "SCH", "JOB", "VAR", "CAL"]
 
 
-def test_destroy_continues_past_failed_delete() -> None:
-    # One DELETE fails; the rest of the reverse order should still run.
-    # Failures land in result.failures; successes in successes.
+def test_destroy_not_supported_carries_reason() -> None:
+    # NotSupportedDelete entries have a human-readable reason explaining
+    # that the v21 API lacks a DELETE endpoint.
     settings = _settings()
     base = f"{settings.url}/{settings.client_id}"
-    loaded = [
-        _loaded("Job", "GOOD"),
-        _loaded("Workflow", "BAD", {"tasks": []}),
-    ]
+    loaded = [_loaded("Job", "J1")]
+
     with respx.mock(assert_all_called=False) as mock:
         _mock_auth(mock, settings)
-        mock.get(f"{base}/objects/GOOD").mock(
-            return_value=httpx.Response(200, json=_managed_payload("JOBS", "GOOD")),
-        )
-        mock.get(f"{base}/objects/BAD").mock(
-            return_value=httpx.Response(200, json=_managed_payload("JOBP", "BAD")),
-        )
-        mock.delete(f"{base}/objects/BAD").mock(
-            return_value=httpx.Response(500, text="boom"),
-        )
-        good_route = mock.delete(f"{base}/objects/GOOD").mock(
-            return_value=httpx.Response(204),
+        mock.get(f"{base}/objects/J1").mock(
+            return_value=httpx.Response(200, json=_managed_payload("JOBS", "J1")),
         )
         with AutomicClient(settings) as client:
             graph = build_graph(loaded)
             result = destroy(loaded, client, graph, only_managed=True)
-    # BAD failed; GOOD still tried and succeeded.
-    assert good_route.called
-    assert result.status == "partial"
-    assert len(result.failures) == 1
-    assert result.failures[0].name == "BAD"
+
+    assert len(result.not_supported) == 1
+    entry = result.not_supported[0]
+    assert isinstance(entry, NotSupportedDelete)
+    assert entry.kind == "Job"
+    assert entry.name == "J1"
+    assert "v21" in entry.reason.lower() or "delete" in entry.reason.lower()

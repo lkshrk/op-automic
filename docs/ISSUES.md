@@ -127,6 +127,13 @@ Scratchpad populated during autonomous implementation. Each entry:
 - **Resolution needed**: consider a `--rollback-on-error` flag in Phase 5
   if customers report half-applied manifests.
 
+### DELETE endpoint not in AE REST v21 — resolved
+- **Phase**: 6 (B5)
+- **Severity**: high
+- **Context**: `destroy` called `client.delete_object(name)` which sends `DELETE /{client_id}/objects/{name}`. Automic AE REST v21 does not expose this endpoint — calls would return 404 or 405.
+- **Default chosen**: `NotSupportedDelete` dataclass added to `engine/destroyer.py`. The `destroy` function now records `NotSupportedDelete` entries instead of calling the API. `DestroyResult.not_supported` holds all such entries and is surfaced in the CLI output (human + JSON). `result.status == "partial"` when any not_supported entries exist. Dry-run is unaffected (still logs successes). `DELETE /{client_id}/objects/{name}` stub remains in `AutomicClient.delete_object` for future use when DELETE support is added.
+- **Resolution needed**: once a DELETE endpoint is confirmed on a live instance or a future API version, add `delete_supported: bool = False` to `AutomicSettings` and opt in to the existing code path.
+
 ### Apply-driven deletes vs destroyer
 - **Phase**: 3
 - **Severity**: low

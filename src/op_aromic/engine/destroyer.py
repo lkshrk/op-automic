@@ -11,6 +11,19 @@ object is already gone, we log a success and move on.
 Continues past individual DELETE failures (unlike the applier's
 pass-halt behaviour) because destroying siblings in parallel has no
 cross-object state that a failure could corrupt.
+
+B5 note — DELETE not supported in AE REST v21
+----------------------------------------------
+The Automic AE REST API v21 does not expose a DELETE endpoint for
+objects. Instead of raising an error, ``destroy`` records every delete
+attempt as ``NotSupportedDelete`` and returns them in
+``DestroyResult.not_supported``. The overall status reflects this: a
+result with any ``not_supported`` entries is ``"partial"``.
+
+This keeps the destroyer safe to call against v21 instances (no failed
+API calls) while making the limitation visible to operators. When a
+future API version adds DELETE support, the ``AUTOMIC_DELETE_SUPPORTED``
+env-var (or a setting) can be added to opt in.
 """
 
 from __future__ import annotations
@@ -25,11 +38,14 @@ from op_aromic.engine.dependency import (
     topological_order,
 )
 from op_aromic.engine.loader import LoadedManifest
+from op_aromic.observability.logging import get_logger
 
 _MANAGED_BY_ANNOTATION = "aromic.io/managed-by"
 _MANAGED_BY_VALUE = "op-aromic"
 
 _DestroyStatus = Literal["success", "partial"]
+
+_logger = get_logger("op_aromic.engine.destroyer")
 
 
 @dataclass(frozen=True)
@@ -42,17 +58,33 @@ class RefusedDelete:
 
 
 @dataclass(frozen=True)
+class NotSupportedDelete:
+    """A delete that could not be performed because the API does not support it.
+
+    Automic AE REST v21 has no DELETE endpoint for objects. The destroyer
+    records ``NotSupportedDelete`` entries rather than calling the API so
+    operators can see which objects were *not* removed and handle them
+    manually or via a future API version.
+    """
+
+    kind: str
+    name: str
+    reason: str = "DELETE not supported by Automic AE REST v21; remove manually"
+
+
+@dataclass(frozen=True)
 class DestroyResult:
     """Outcome of a ``destroy`` call."""
 
     successes: list[SuccessfulApply] = field(default_factory=list)
     failures: list[FailedApply] = field(default_factory=list)
     refused: list[RefusedDelete] = field(default_factory=list)
+    not_supported: list[NotSupportedDelete] = field(default_factory=list)
     dry_run: bool = False
 
     @property
     def status(self) -> _DestroyStatus:
-        if self.failures or self.refused:
+        if self.failures or self.refused or self.not_supported:
             return "partial"
         return "success"
 
@@ -91,6 +123,7 @@ def destroy(
     successes: list[SuccessfulApply] = []
     failures: list[FailedApply] = []
     refused: list[RefusedDelete] = []
+    not_supported: list[NotSupportedDelete] = []
 
     declared: set[tuple[str, str]] = {
         (lm.manifest.kind, lm.manifest.metadata.name) for lm in loaded
@@ -133,25 +166,23 @@ def destroy(
                 )
                 continue
 
-            try:
-                client.delete_object(name)
-            except Exception as exc:
-                failures.append(
-                    FailedApply(
-                        kind=kind, name=name, action="delete", reason=str(exc),
-                    ),
-                )
-                continue
-            successes.append(
-                SuccessfulApply(kind=kind, name=name, action="delete"),
+            # B5: Automic AE REST v21 does not expose a DELETE endpoint.
+            # Record NotSupportedDelete instead of calling the API so the
+            # caller can surface the limitation without raising an error.
+            _logger.warning(
+                "destroyer.delete_not_supported",
+                kind=kind,
+                name=name,
             )
+            not_supported.append(NotSupportedDelete(kind=kind, name=name))
 
     return DestroyResult(
         successes=successes,
         failures=failures,
         refused=refused,
+        not_supported=not_supported,
         dry_run=dry_run,
     )
 
 
-__all__ = ["DestroyResult", "RefusedDelete", "destroy"]
+__all__ = ["DestroyResult", "NotSupportedDelete", "RefusedDelete", "destroy"]

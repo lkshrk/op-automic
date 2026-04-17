@@ -942,6 +942,7 @@ def destroy(
                     "successes": len(result.successes),
                     "failures": len(result.failures),
                     "refused": len(result.refused),
+                    "not_supported": len(result.not_supported),
                 },
                 details={
                     "failures": [
@@ -951,6 +952,10 @@ def destroy(
                     "refused": [
                         {"kind": r.kind, "name": r.name, "reason": r.reason}
                         for r in result.refused
+                    ],
+                    "not_supported": [
+                        {"kind": ns.kind, "name": ns.name, "reason": ns.reason}
+                        for ns in result.not_supported
                     ],
                 },
             ),
@@ -965,6 +970,10 @@ def destroy(
     for refusal in result.refused:
         _error_console.print(
             f"[yellow]REFUSED[/] {refusal.kind}/{refusal.name}: {refusal.reason}",
+        )
+    for ns in result.not_supported:
+        _error_console.print(
+            f"[yellow]NOT SUPPORTED[/] {ns.kind}/{ns.name}: {ns.reason}",
         )
     raise typer.Exit(code=0 if result.status == "success" else 2)
 

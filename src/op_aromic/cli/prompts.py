@@ -85,7 +85,8 @@ def summarise_destroy(result: DestroyResult, console: Console | None = None) -> 
     out.print(
         f"[bold]Destroyed:[/] {len(result.successes)} deleted, "
         f"{len(result.failures)} failed, "
-        f"{len(result.refused)} refused",
+        f"{len(result.refused)} refused, "
+        f"{len(result.not_supported)} not supported (remove manually)",
     )
 
 
